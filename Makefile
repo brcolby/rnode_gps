@@ -40,6 +40,7 @@ prep-esp32:
 	arduino-cli lib install "Adafruit NeoPixel"
 	arduino-cli lib install "XPowersLib"
 	arduino-cli lib install "Crypto"
+	arduino-cli lib install "SensorLib@0.3.3"
 
 prep-samd:
 	arduino-cli core update-index --config-file arduino-cli.yaml
@@ -96,6 +97,12 @@ firmware-tdeck:
 
 firmware-tbeam_supreme:
 	arduino-cli compile --log --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc" -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=-DBOARD_MODEL=0x3D"
+
+firmware-tbeam_supreme-telemetry-usb:
+	./Tools/telemetry_firmware.sh build usb
+
+firmware-tbeam_supreme-telemetry-uart:
+	./Tools/telemetry_firmware.sh build uart
 
 firmware-lora32_v10: check_bt_buffers
 	arduino-cli compile --log --fqbn esp32:esp32:ttgo-lora32 -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=\"-DBOARD_MODEL=0x39\""

@@ -6,6 +6,13 @@
 
 This is the open firmware that powers RNode devices.
 
+## T-Beam Supreme GPS/IMU fork
+
+This fork adds an opt-in T-Beam Supreme build that multiplexes normal RNode
+traffic, GPS NMEA, and QMI8658 IMU samples over one USB or UART serial link.
+See [TELEMETRY.md](TELEMETRY.md) for build, flash, host setup, and protocol
+details. The upstream build targets remain unchanged.
+
 An RNode is an open, free and unrestricted digital radio transceiver. It enables anyone to send and receive any kind of data over both short and very long distances. RNodes can be used with many different kinds of programs and systems, but they are especially well suited for use with [Reticulum](https://reticulum.network).
 
 RNode is not a product, and not any *one* specific device in particular. It is a system that is easy to replicate across space and time, that produces highly functional communications tools, which respects user autonomy and empowers individuals and communities to protect their sovereignty, privacy and ability to communicate and exchange data and ideas freely.
