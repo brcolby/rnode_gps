@@ -87,7 +87,8 @@ Then build and flash in one command, substituting the displayed port:
 ./Tools/telemetry_firmware.sh flash usb /dev/ttyACM0
 
 # macOS example
-./Tools/telemetry_firmware.sh flash usb /dev/cu.usbmodem101
+RNODECONF=/Users/bcolby/projects/gestalt/.venv/bin/rnodeconf \
+  ./Tools/telemetry_firmware.sh flash usb /dev/cu.usbmodem101
 ```
 
 The wrapper prints `Firmware hash provisioned` after the runtime device has
@@ -117,7 +118,7 @@ the USB build because it needs no external serial wiring.
 ## Host setup
 
 The broker and Reticulum configuration are documented in
-[Host/README.md](Host/README.md). In brief:
+[Host/README.md](Host/README.md). On Linux, use the default `/run` endpoints:
 
 ```bash
 python3 -m venv .venv
@@ -128,6 +129,22 @@ sudo .venv/bin/python Host/rnode_broker.py --port /dev/ttyACM0
 Reticulum opens `/run/rnode-gps/rnode`; GPS consumers open
 `/run/rnode-gps/gps`; IMU consumers connect to
 `/run/rnode-gps/imu.sock`.
+
+On macOS, avoid root-owned `/run` paths and start the broker explicitly with
+writable endpoints:
+
+```bash
+/Users/bcolby/projects/gestalt/.venv/bin/python Host/rnode_broker.py \
+  --port /dev/cu.usbmodem101 \
+  --rnode-link /tmp/rnode-gps/rnode \
+  --gps-link /tmp/rnode-gps/gps \
+  --imu-socket /tmp/rnode-gps/imu.sock \
+  --imu-rate 50
+```
+
+The broker must remain running while consumers use those endpoints. It is the
+only process that may open the physical serial port; stop it before flashing,
+running `rnodeconf`, or performing direct serial validation.
 
 ## KISS extension
 

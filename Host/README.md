@@ -2,7 +2,7 @@
 
 `rnode_broker.py` is the only process that opens the physical T-Beam serial
 device. It preserves ordinary RNode KISS frames byte-for-byte and consumes
-only this fork's command `0xA0` frames. It exposes:
+only this fork's command `0xA0` frames. Its Linux defaults expose:
 
 - `/run/rnode-gps/rnode`: PTY for an unchanged Reticulum `RNodeInterface`.
 - `/run/rnode-gps/gps`: PTY containing checksum-valid NMEA with CR/LF endings.
@@ -18,16 +18,23 @@ python3 -m venv .venv
 sudo .venv/bin/python Host/rnode_broker.py --port /dev/ttyACM0
 ```
 
-Root is only needed when creating endpoints under `/run`. For development,
-use writable paths and no `sudo`:
+Root is only needed when creating endpoints under `/run`. On macOS, `/run` is
+not normally available as a writable runtime directory. Use `/tmp` paths and
+no `sudo`:
 
 ```bash
 .venv/bin/python Host/rnode_broker.py \
   --port /dev/cu.usbmodem101 \
   --rnode-link /tmp/rnode-gps/rnode \
   --gps-link /tmp/rnode-gps/gps \
-  --imu-socket /tmp/rnode-gps/imu.sock
+  --imu-socket /tmp/rnode-gps/imu.sock \
+  --imu-rate 50
 ```
+
+Leave this process running while Reticulum or a sensor fixture uses the PTYs
+and socket. Stop it with Ctrl-C before flashing, running `rnodeconf`, or using
+a direct serial smoke test. A broker-mode smoke test validates endpoints from
+this process; it does not launch the broker itself.
 
 The broker requests GPS plus 50 Hz IMU by default. Use `--no-gps`, `--no-imu`,
 or `--imu-rate {10,25,50,100}` to change that. It polls firmware drop
@@ -57,6 +64,9 @@ Point a standard RNode interface at the broker's RNode PTY:
   codingrate = 5
 ```
 
+Use `port = /tmp/rnode-gps/rnode` for the macOS command above. Reticulum must
+never open the physical USB or UART device while the broker owns it.
+
 Set the radio parameters to values legal for your location and matching the
 rest of your network. Start the broker before `rnsd`.
 
@@ -69,11 +79,15 @@ setting on a PTY is ignored, but 9600 is a conventional choice:
 cat /run/rnode-gps/gps
 ```
 
+Use `/tmp/rnode-gps/gps` on macOS.
+
 Read newline-delimited IMU JSON with `socat`:
 
 ```bash
 socat - UNIX-CONNECT:/run/rnode-gps/imu.sock
 ```
+
+Use `/tmp/rnode-gps/imu.sock` on macOS.
 
 IMU records contain the raw integer units (`accel_mg`, `gyro_mdps`), converted
 SI values, temperature, device monotonic time, host wall-clock time, sequence,
