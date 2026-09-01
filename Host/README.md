@@ -30,7 +30,16 @@ use writable paths and no `sudo`:
 ```
 
 The broker requests GPS plus 50 Hz IMU by default. Use `--no-gps`, `--no-imu`,
-or `--imu-rate {10,25,50,100}` to change that. `--verbose` enables debug logs.
+or `--imu-rate {10,25,50,100}` to change that. It polls firmware drop
+statistics every 30 seconds; `--stats-interval` changes that interval and
+`--negotiation-warn` changes the default 10-second warning threshold.
+`--verbose` enables debug logs.
+
+The broker does not expose command `0xA0` to Reticulum. It validates strict
+KISS escaping, the telemetry CRC, message lengths, and NMEA checksums before
+routing sensor records. Corrupt sensor frames are logged and discarded. A
+malformed ordinary RNode frame or a primary queue beyond 1 MiB is fatal, so
+radio traffic cannot be silently rewritten or dropped.
 
 ## Reticulum
 
@@ -72,7 +81,12 @@ and sensor status.
 
 Sensor consumers are best-effort and cannot block RNode traffic. The primary
 RNode PTY instead has a bounded 1 MiB queue and fails loudly if Reticulum stops
-reading it.
+reading it. GPS overflow drops only complete queued NMEA records, never the
+remainder of a partially written sentence. A partial or stalled IMU socket
+write disconnects that client. On an RNode reset or backwards device clock,
+queued GPS data is cleared, IMU clients are disconnected to mark the session
+boundary, and capabilities/configuration negotiation restarts while ordinary
+RNode frames continue through the PTY.
 
 ## systemd example
 

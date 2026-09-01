@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import tty
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence, Union
@@ -48,6 +49,8 @@ ERROR_INTEGRITY = 0x04
 GPS_ENABLED = 0x01
 IMU_ENABLED = 0x02
 SUPPORTED_IMU_RATES = (10, 25, 50, 100)
+IMU_RATE_BITS = {rate: 1 << index for index, rate in enumerate(SUPPORTED_IMU_RATES)}
+KNOWN_SENSOR_FLAGS = GPS_ENABLED | IMU_ENABLED
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,21 +62,33 @@ class KissFrame:
     command: int | None
     payload: bytes
     raw: bytes
+    valid: bool = True
+    error: str | None = None
 
 
 class KissStreamDecoder:
     """Incrementally split KISS without rewriting frames that are forwarded."""
 
     def __init__(self, *, max_frame_size: int = 8192) -> None:
+        if max_frame_size < 4:
+            raise ValueError("max_frame_size must be at least 4 bytes")
         self.max_frame_size = max_frame_size
         self._in_frame = False
         self._escaped = False
+        self._discarding = False
+        self._valid = True
+        self._error: str | None = None
+        self._command: int | None = None
         self._raw = bytearray()
         self._decoded = bytearray()
 
     def reset(self) -> None:
         self._in_frame = False
         self._escaped = False
+        self._discarding = False
+        self._valid = True
+        self._error = None
+        self._command = None
         self._raw.clear()
         self._decoded.clear()
 
@@ -81,11 +96,20 @@ class KissStreamDecoder:
         for value in data:
             if value == FEND:
                 completed = None
-                if self._in_frame and self._decoded:
+                if self._in_frame and (self._decoded or self._discarding):
                     raw = bytes(self._raw) + bytes((FEND,))
-                    completed = KissFrame(self._decoded[0], bytes(self._decoded[1:]), raw)
+                    if self._escaped:
+                        self._valid = False
+                        self._error = self._error or "dangling KISS escape"
+                    command = self._decoded[0] if self._decoded else self._command
+                    payload = bytes(self._decoded[1:]) if self._decoded else b""
+                    completed = KissFrame(command, payload, raw, self._valid, self._error)
                 self._in_frame = True
                 self._escaped = False
+                self._discarding = False
+                self._valid = True
+                self._error = None
+                self._command = None
                 self._raw = bytearray((FEND,))
                 self._decoded.clear()
                 if completed is not None:
@@ -98,14 +122,21 @@ class KissStreamDecoder:
                 yield KissFrame(None, b"", bytes((value,)))
                 continue
 
+            if self._discarding:
+                continue
+
             self._raw.append(value)
             if len(self._raw) > self.max_frame_size:
-                raw = bytes(self._raw)
-                self.reset()
-                yield KissFrame(None, b"", raw)
+                self._command = self._decoded[0] if self._decoded else None
+                self._discarding = True
+                self._valid = False
+                self._error = f"KISS frame exceeds {self.max_frame_size} bytes"
                 continue
 
             if value == FESC:
+                if self._escaped:
+                    self._valid = False
+                    self._error = self._error or "invalid KISS escape pair"
                 self._escaped = True
             elif self._escaped:
                 if value == TFEND:
@@ -113,6 +144,8 @@ class KissStreamDecoder:
                 elif value == TFESC:
                     self._decoded.append(FESC)
                 else:
+                    self._valid = False
+                    self._error = self._error or "invalid KISS escape pair"
                     self._decoded.append(value)
                 self._escaped = False
             else:
@@ -150,6 +183,28 @@ def encode_telemetry(subtype: int, body: bytes = b"", *, version: int = PROTOCOL
 
     content = bytes((version, subtype)) + body
     return content + struct.pack(">H", crc16_ccitt(content))
+
+
+def valid_nmea(sentence: str) -> bool:
+    """Validate the strict NMEA shape and XOR checksum used by the firmware."""
+
+    if not 7 <= len(sentence) <= 128 or sentence[0] not in "$!":
+        return False
+    checksum_at = sentence.find("*", 1)
+    if checksum_at < 0 or checksum_at + 3 != len(sentence):
+        return False
+    try:
+        expected = int(sentence[checksum_at + 1 :], 16)
+    except ValueError:
+        return False
+    checksum = 0
+    try:
+        body = sentence[1:checksum_at].encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    for value in body:
+        checksum ^= value
+    return checksum == expected
 
 
 @dataclass(frozen=True)
@@ -249,9 +304,12 @@ def decode_telemetry(payload: bytes) -> TelemetryMessage:
         return Capabilities(*body)
     if subtype == CONFIG_STATE and len(body) == 3:
         return Configuration(*body)
-    if subtype == GPS_NMEA and len(body) >= 10:
+    if subtype == GPS_NMEA and 17 <= len(body) <= 138:
         sequence, device_time_us = struct.unpack(">HQ", body[:10])
-        return GPSMessage(sequence, device_time_us, body[10:].decode("ascii"))
+        sentence = body[10:].decode("ascii")
+        if not valid_nmea(sentence):
+            raise ValueError("invalid NMEA sentence in telemetry frame")
+        return GPSMessage(sequence, device_time_us, sentence)
     if subtype == IMU_SAMPLE and len(body) == 31:
         values = struct.unpack(">HQhhhiiihB", body)
         return IMUMessage(
@@ -327,6 +385,8 @@ class RNodeBroker:
         enable_imu: bool = True,
         imu_rate_hz: int = 50,
         settle_time_s: float = 1.0,
+        stats_interval_s: float = 30.0,
+        negotiation_warn_s: float = 10.0,
     ) -> None:
         if imu_rate_hz not in SUPPORTED_IMU_RATES:
             raise ValueError(f"unsupported IMU rate {imu_rate_hz}")
@@ -337,7 +397,15 @@ class RNodeBroker:
         self.imu_socket_path = imu_socket
         self.enable_flags = (GPS_ENABLED if enable_gps else 0) | (IMU_ENABLED if enable_imu else 0)
         self.imu_rate_hz = imu_rate_hz
+        if settle_time_s < 0:
+            raise ValueError("settle_time_s must not be negative")
         self.settle_time_s = settle_time_s
+        if stats_interval_s <= 0:
+            raise ValueError("stats_interval_s must be positive")
+        if negotiation_warn_s <= 0:
+            raise ValueError("negotiation_warn_s must be positive")
+        self.stats_interval_s = stats_interval_s
+        self.negotiation_warn_s = negotiation_warn_s
 
         self.selector = selectors.DefaultSelector()
         self.physical_decoder = KissStreamDecoder()
@@ -351,13 +419,21 @@ class RNodeBroker:
         self.gps_target: str | None = None
         self.imu_server: socket.socket | None = None
         self.imu_clients: set[socket.socket] = set()
+        self.physical_output = bytearray()
         self.rnode_output = bytearray()
-        self.gps_output = bytearray()
+        self.gps_output: deque[bytearray] = deque()
+        self.gps_output_bytes = 0
         self.capabilities: Capabilities | None = None
         self.configuration: Configuration | None = None
+        self.expected_configuration: Configuration | None = None
+        self.statistics: Statistics | None = None
         self.last_gps_sequence: int | None = None
         self.last_imu_sequence: int | None = None
+        self.last_device_time_us: int | None = None
         self.next_caps_query = 0.0
+        self.next_stats_query = math.inf
+        self.negotiation_started = 0.0
+        self.negotiation_warned = False
 
     def _open(self) -> None:
         try:
@@ -380,26 +456,52 @@ class RNodeBroker:
         self.selector.register(self.serial_port.fileno(), selectors.EVENT_READ, "physical")
         self.selector.register(self.rnode_master, selectors.EVENT_READ, "rnode")
         self.selector.register(self.imu_server, selectors.EVENT_READ, "imu_server")
-        self.next_caps_query = time.monotonic() + self.settle_time_s
+        self.negotiation_started = time.monotonic()
+        self.next_caps_query = self.negotiation_started + self.settle_time_s
         LOGGER.info("physical RNode: %s at %d baud", self.port, self.baudrate)
         LOGGER.info("RNode PTY: %s -> %s", self.rnode_link, self.rnode_target)
         LOGGER.info("GPS PTY: %s -> %s", self.gps_link, self.gps_target)
         LOGGER.info("IMU socket: %s", self.imu_socket_path)
 
-    def _send_physical(self, frame: bytes) -> None:
+    def _queue_physical(self, frame: bytes) -> None:
+        if len(self.physical_output) + len(frame) > 1024 * 1024:
+            raise BufferError("physical serial consumer is more than 1 MiB behind")
+        self.physical_output.extend(frame)
+
+    def _flush_physical(self) -> None:
+        if not self.physical_output:
+            return
         assert self.serial_port is not None
-        written = self.serial_port.write(frame)
-        if written != len(frame):
-            raise OSError(f"short serial write: {written}/{len(frame)}")
+        written = self.serial_port.write(self.physical_output)
+        if written is None or written == 0:
+            return
+        if written < 0 or written > len(self.physical_output):
+            raise OSError(f"invalid serial write count: {written}/{len(self.physical_output)}")
+        del self.physical_output[:written]
 
     def _query_capabilities(self) -> None:
-        self._send_physical(encode_kiss(CMD_TELEMETRY, encode_telemetry(CAPS_QUERY)))
+        self._queue_physical(encode_kiss(CMD_TELEMETRY, encode_telemetry(CAPS_QUERY)))
         self.next_caps_query = time.monotonic() + 2.0
 
+    def _query_statistics(self) -> None:
+        self._queue_physical(encode_kiss(CMD_TELEMETRY, encode_telemetry(STATS_QUERY)))
+        self.next_stats_query = time.monotonic() + self.stats_interval_s
+
     def _configure(self, capabilities: Capabilities) -> None:
-        flags = self.enable_flags & capabilities.supported & capabilities.ready
+        flags = self.enable_flags & capabilities.supported & capabilities.ready & KNOWN_SENSOR_FLAGS
+        if flags & IMU_ENABLED and not capabilities.rate_mask & IMU_RATE_BITS[self.imu_rate_hz]:
+            LOGGER.warning("firmware does not support requested IMU rate %d Hz; leaving IMU disabled", self.imu_rate_hz)
+            flags &= ~IMU_ENABLED
+        unavailable = self.enable_flags & ~flags
+        if unavailable:
+            LOGGER.warning("requested telemetry sensors unavailable: flags=0x%02x", unavailable)
+        self.expected_configuration = Configuration(
+            enabled=flags,
+            imu_rate_hz=self.imu_rate_hz,
+            ready=capabilities.ready & KNOWN_SENSOR_FLAGS,
+        )
         payload = encode_telemetry(CONFIG_SET, bytes((flags, self.imu_rate_hz)))
-        self._send_physical(encode_kiss(CMD_TELEMETRY, payload))
+        self._queue_physical(encode_kiss(CMD_TELEMETRY, payload))
 
     def _queue_rnode(self, data: bytes) -> None:
         if len(self.rnode_output) + len(data) > 1024 * 1024:
@@ -407,11 +509,17 @@ class RNodeBroker:
         self.rnode_output.extend(data)
 
     def _queue_gps(self, sentence: str) -> None:
-        data = sentence.encode("ascii") + b"\r\n"
-        if len(self.gps_output) + len(data) > 64 * 1024:
-            LOGGER.warning("GPS PTY consumer is behind; dropping buffered NMEA")
+        data = bytearray(sentence.encode("ascii") + b"\r\n")
+        if self.gps_output_bytes + len(data) > 64 * 1024:
+            LOGGER.warning("GPS PTY consumer is behind; dropping complete buffered NMEA records")
+            first = self.gps_output[0] if self.gps_output else None
             self.gps_output.clear()
-        self.gps_output.extend(data)
+            self.gps_output_bytes = 0
+            if first:
+                self.gps_output.append(first)
+                self.gps_output_bytes = len(first)
+        self.gps_output.append(data)
+        self.gps_output_bytes += len(data)
 
     @staticmethod
     def _flush_fd(fd: int, pending: bytearray) -> None:
@@ -426,6 +534,16 @@ class RNodeBroker:
                 return
             raise
         del pending[:written]
+
+    def _flush_gps(self) -> None:
+        if not self.gps_output:
+            return
+        pending = self.gps_output[0]
+        before = len(pending)
+        self._flush_fd(self.gps_master, pending)
+        self.gps_output_bytes -= before - len(pending)
+        if not pending:
+            self.gps_output.popleft()
 
     def _broadcast_imu(self, sample: IMUMessage) -> None:
         line = sample.as_json()
@@ -447,6 +565,35 @@ class RNodeBroker:
             dropped = (current - expected) & 0xFFFF
             LOGGER.warning("%s telemetry sequence gap: expected %d, got %d (%d lost)", stream, expected, current, dropped)
 
+    def _reset_session(self, reason: str, *, delay_s: float = 0.5) -> None:
+        LOGGER.warning("telemetry session reset: %s", reason)
+        self.capabilities = None
+        self.configuration = None
+        self.expected_configuration = None
+        self.statistics = None
+        self.last_gps_sequence = None
+        self.last_imu_sequence = None
+        self.last_device_time_us = None
+        self.gps_output.clear()
+        self.gps_output_bytes = 0
+        for client in tuple(self.imu_clients):
+            self.imu_clients.discard(client)
+            client.close()
+        self.next_stats_query = math.inf
+        self.negotiation_started = time.monotonic()
+        self.negotiation_warned = False
+        self.next_caps_query = self.negotiation_started + delay_s
+
+    def _observe_device_time(self, timestamp_us: int) -> bool:
+        if self.last_device_time_us is not None and timestamp_us < self.last_device_time_us:
+            self._reset_session(
+                f"device monotonic clock moved backwards from {self.last_device_time_us} to {timestamp_us}",
+                delay_s=0.0,
+            )
+            return False
+        self.last_device_time_us = timestamp_us
+        return True
+
     def _handle_telemetry(self, payload: bytes) -> None:
         try:
             message = decode_telemetry(payload)
@@ -465,19 +612,45 @@ class RNodeBroker:
             )
             self._configure(message)
         elif isinstance(message, Configuration):
+            expected = self.expected_configuration
+            invalid_flags = message.enabled & ~KNOWN_SENSOR_FLAGS
+            if (
+                expected is None
+                or invalid_flags
+                or message.enabled != expected.enabled
+                or message.imu_rate_hz != expected.imu_rate_hz
+                or message.enabled & ~message.ready
+            ):
+                LOGGER.warning("firmware returned unexpected telemetry configuration: %s", message)
+                self.configuration = None
+                self.next_caps_query = min(self.next_caps_query, time.monotonic() + 0.1)
+                return
             self.configuration = message
             self.next_caps_query = math.inf
+            self.next_stats_query = time.monotonic() + self.stats_interval_s
             LOGGER.info("telemetry configured: flags=0x%02x, IMU=%d Hz", message.enabled, message.imu_rate_hz)
         elif isinstance(message, GPSMessage):
+            if self.configuration is None or not self.configuration.enabled & GPS_ENABLED:
+                LOGGER.warning("discarding GPS sample before GPS negotiation completed")
+                return
+            if not self._observe_device_time(message.device_time_us):
+                return
             self._warn_sequence_gap("GPS", self.last_gps_sequence, message.sequence)
             self.last_gps_sequence = message.sequence
             self._queue_gps(message.sentence)
         elif isinstance(message, IMUMessage):
+            if self.configuration is None or not self.configuration.enabled & IMU_ENABLED:
+                LOGGER.warning("discarding IMU sample before IMU negotiation completed")
+                return
+            if not self._observe_device_time(message.device_time_us):
+                return
             self._warn_sequence_gap("IMU", self.last_imu_sequence, message.sequence)
             self.last_imu_sequence = message.sequence
             self._broadcast_imu(message)
         elif isinstance(message, Statistics):
+            self.statistics = message
             LOGGER.info("telemetry statistics: %s", message)
+            self.next_stats_query = time.monotonic() + self.stats_interval_s
         elif isinstance(message, TelemetryError):
             LOGGER.error("firmware rejected telemetry command with error 0x%02x", message.code)
 
@@ -487,16 +660,17 @@ class RNodeBroker:
         if not data:
             return
         for frame in self.physical_decoder.feed(data):
+            if not frame.valid:
+                if frame.command == CMD_TELEMETRY:
+                    LOGGER.warning("discarding malformed telemetry KISS frame: %s", frame.error)
+                    continue
+                raise ValueError(f"malformed physical RNode KISS frame: {frame.error}")
             if frame.command == CMD_TELEMETRY:
                 self._handle_telemetry(frame.payload)
                 continue
             self._queue_rnode(frame.raw)
             if frame.command == CMD_RESET:
-                self.capabilities = None
-                self.configuration = None
-                self.last_gps_sequence = None
-                self.last_imu_sequence = None
-                self.next_caps_query = time.monotonic() + 0.5
+                self._reset_session("stock RNode reset indication")
 
     def _read_rnode(self) -> None:
         try:
@@ -510,7 +684,9 @@ class RNodeBroker:
         # Hold partial host frames until their delimiter arrives. This is what
         # guarantees broker control traffic is inserted only between frames.
         for frame in self.host_decoder.feed(data):
-            self._send_physical(frame.raw)
+            if not frame.valid:
+                raise ValueError(f"malformed host RNode KISS frame: {frame.error}")
+            self._queue_physical(frame.raw)
 
     def _accept_imu(self) -> None:
         assert self.imu_server is not None
@@ -531,9 +707,20 @@ class RNodeBroker:
                         self._accept_imu()
 
                 self._flush_fd(self.rnode_master, self.rnode_output)
-                self._flush_fd(self.gps_master, self.gps_output)
-                if time.monotonic() >= self.next_caps_query:
+                self._flush_gps()
+                self._flush_physical()
+                now = time.monotonic()
+                if now >= self.next_caps_query:
                     self._query_capabilities()
+                if now >= self.next_stats_query:
+                    self._query_statistics()
+                if (
+                    self.configuration is None
+                    and not self.negotiation_warned
+                    and now - self.negotiation_started >= self.negotiation_warn_s
+                ):
+                    LOGGER.warning("telemetry negotiation has not completed after %.1f seconds", now - self.negotiation_started)
+                    self.negotiation_warned = True
         finally:
             self.close()
 
@@ -580,6 +767,8 @@ def add_rnode_broker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-gps", action="store_true")
     parser.add_argument("--no-imu", action="store_true")
     parser.add_argument("--settle-time", type=float, default=1.0)
+    parser.add_argument("--stats-interval", type=float, default=30.0)
+    parser.add_argument("--negotiation-warn", type=float, default=10.0)
     parser.add_argument("--verbose", action="store_true")
 
 
@@ -598,6 +787,8 @@ def run_rnode_broker(args: argparse.Namespace) -> int:
         enable_imu=not args.no_imu,
         imu_rate_hz=args.imu_rate,
         settle_time_s=args.settle_time,
+        stats_interval_s=args.stats_interval,
+        negotiation_warn_s=args.negotiation_warn,
     )
     try:
         broker.run()

@@ -15,9 +15,12 @@ from pathlib import Path
 
 from Host.rnode_broker import (
     CMD_TELEMETRY,
+    CAPS_RESPONSE,
+    CONFIG_STATE,
     FEND,
     FESC,
     GPS_NMEA,
+    GPS_ENABLED,
     IMU_SAMPLE,
     PROTOCOL_VERSION,
     STATS_RESPONSE,
@@ -25,6 +28,7 @@ from Host.rnode_broker import (
     TFESC,
     GPSMessage,
     IMUMessage,
+    Configuration,
     KissStreamDecoder,
     RNodeBroker,
     Statistics,
@@ -32,6 +36,7 @@ from Host.rnode_broker import (
     decode_telemetry,
     encode_kiss,
     encode_telemetry,
+    valid_nmea,
 )
 
 
@@ -59,6 +64,33 @@ class KissCodecTest(unittest.TestCase):
         frames = list(KissStreamDecoder().feed(first + second))
         self.assertEqual([frame.raw for frame in frames], [first, second])
 
+    def test_marks_invalid_and_dangling_escape_without_losing_raw_bytes(self) -> None:
+        for raw, error in (
+            (bytes((FEND, CMD_TELEMETRY, FESC, 0x01, FEND)), "invalid KISS escape pair"),
+            (bytes((FEND, CMD_TELEMETRY, 0x01, FESC, FEND)), "dangling KISS escape"),
+        ):
+            with self.subTest(error=error):
+                frame = list(KissStreamDecoder().feed(raw))[0]
+                self.assertFalse(frame.valid)
+                self.assertEqual(frame.error, error)
+                self.assertEqual(frame.raw, raw)
+                self.assertEqual(frame.command, CMD_TELEMETRY)
+
+    def test_bounds_oversized_frame_and_recovers_at_next_delimiter(self) -> None:
+        decoder = KissStreamDecoder(max_frame_size=8)
+        oversized = bytes((FEND, CMD_TELEMETRY)) + b"1234567890" + bytes((FEND,))
+        valid = encode_kiss(0x01, b"ok")
+        frames = list(decoder.feed(oversized + valid))
+        self.assertFalse(frames[0].valid)
+        self.assertEqual(frames[0].command, CMD_TELEMETRY)
+        self.assertIn("exceeds 8 bytes", frames[0].error or "")
+        self.assertEqual(frames[1].raw, valid)
+
+    def test_preserves_noise_before_first_frame(self) -> None:
+        noise = b"boot\r\n"
+        frames = list(KissStreamDecoder().feed(noise + encode_kiss(0x01, b"ok")))
+        self.assertEqual(b"".join(frame.raw for frame in frames), noise + encode_kiss(0x01, b"ok"))
+
 
 class TelemetryCodecTest(unittest.TestCase):
     def test_crc_matches_ccitt_false_check_value(self) -> None:
@@ -66,14 +98,14 @@ class TelemetryCodecTest(unittest.TestCase):
 
     def test_decodes_gps(self) -> None:
         payload = encode_telemetry(
-            GPS_NMEA, struct.pack(">HQ", 7, 123456) + b"$GPRMC,example*00"
+            GPS_NMEA, struct.pack(">HQ", 7, 123456) + b"$GPRMC,example*0F"
         )
         message = decode_telemetry(payload)
         self.assertIsInstance(message, GPSMessage)
         assert isinstance(message, GPSMessage)
         self.assertEqual(message.sequence, 7)
         self.assertEqual(message.device_time_us, 123456)
-        self.assertEqual(message.sentence, "$GPRMC,example*00")
+        self.assertEqual(message.sentence, "$GPRMC,example*0F")
 
     def test_decodes_imu_and_emits_jsonl(self) -> None:
         body = struct.pack(">HQhhhiiihB", 9, 987654, 100, -200, 1000, 1001, -2002, 3003, 2450, 7)
@@ -95,6 +127,20 @@ class TelemetryCodecTest(unittest.TestCase):
         payload[4] ^= 0x01
         with self.assertRaisesRegex(ValueError, "CRC mismatch"):
             decode_telemetry(bytes(payload))
+
+    def test_rejects_bad_nmea_after_valid_telemetry_crc(self) -> None:
+        for sentence in (b"$GPRMC,example*00", b"$GPRMC,example*0Fjunk", b"$plain*00"):
+            with self.subTest(sentence=sentence):
+                payload = encode_telemetry(GPS_NMEA, struct.pack(">HQ", 1, 2) + sentence)
+                with self.assertRaisesRegex(ValueError, "invalid NMEA"):
+                    decode_telemetry(payload)
+
+    def test_validates_nmea_checksum_and_terminal_shape(self) -> None:
+        self.assertTrue(valid_nmea("$GPGGA,123*4A"))
+        self.assertTrue(valid_nmea("!AIVDM,1*4A"))
+        self.assertFalse(valid_nmea("$GPGGA,123*00"))
+        self.assertFalse(valid_nmea("$GPGGA,123*4Aextra"))
+        self.assertFalse(valid_nmea("$GPGGA,é*00"))
 
     def test_decodes_statistics(self) -> None:
         body = struct.pack(">HHIII", 12, 34, 56, 78, 90)
@@ -136,6 +182,141 @@ class ProtocolVectorTest(unittest.TestCase):
         reset_frames = list(KissStreamDecoder().feed(bytes.fromhex(reset["kiss_hex"])))
         self.assertEqual([(frame.command, frame.payload) for frame in reset_frames], [(0x55, b"\xf8")])
         self.assertEqual(first_query["kiss_hex"], encode_kiss(CMD_TELEMETRY, encode_telemetry(0x00)).hex())
+
+
+class _PartialSerial:
+    def __init__(self, incoming: bytes = b"", max_write: int = 3) -> None:
+        self.incoming = bytearray(incoming)
+        self.max_write = max_write
+        self.written = bytearray()
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self.incoming)
+
+    def read(self, size: int) -> bytes:
+        result = bytes(self.incoming[:size])
+        del self.incoming[:size]
+        return result
+
+    def write(self, data: bytes) -> int:
+        count = min(len(data), self.max_write)
+        self.written.extend(data[:count])
+        return count
+
+
+class _PartialClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def send(self, data: bytes) -> int:
+        return max(0, len(data) - 1)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class BrokerStateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.broker = RNodeBroker(port="simulated")
+
+    def tearDown(self) -> None:
+        self.broker.selector.close()
+
+    def test_retries_partial_serial_writes_without_reordering(self) -> None:
+        serial = _PartialSerial(max_write=2)
+        self.broker.serial_port = serial
+        frames = encode_kiss(0x01, b"one") + encode_kiss(0x02, b"two")
+        self.broker._queue_physical(frames)
+        while self.broker.physical_output:
+            self.broker._flush_physical()
+        self.assertEqual(serial.written, frames)
+
+    def test_capabilities_mask_rate_and_configuration_must_match(self) -> None:
+        capabilities = encode_telemetry(CAPS_RESPONSE, bytes((0x03, 0x03, 0x01, 0x01, 0x56)))
+        self.broker._handle_telemetry(capabilities)
+        queued = list(KissStreamDecoder().feed(bytes(self.broker.physical_output)))
+        self.assertEqual(queued[0].payload, encode_telemetry(0x02, bytes((GPS_ENABLED, 50))))
+        self.assertEqual(self.broker.expected_configuration, Configuration(GPS_ENABLED, 50, 0x03))
+
+        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((0x03, 50, 0x03))))
+        self.assertIsNone(self.broker.configuration)
+        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((GPS_ENABLED, 50, 0x03))))
+        self.assertEqual(self.broker.configuration, Configuration(GPS_ENABLED, 50, 0x03))
+
+    def test_discards_sensor_samples_before_negotiation(self) -> None:
+        gps = encode_telemetry(GPS_NMEA, struct.pack(">HQ", 1, 10) + b"$GPGGA,123*4A")
+        self.broker._handle_telemetry(gps)
+        self.assertEqual(self.broker.gps_output_bytes, 0)
+
+    def test_backwards_device_clock_resets_session_and_stale_sensor_queue(self) -> None:
+        self.broker.configuration = Configuration(GPS_ENABLED, 50, GPS_ENABLED)
+        first = encode_telemetry(GPS_NMEA, struct.pack(">HQ", 1, 100) + b"$GPGGA,123*4A")
+        second = encode_telemetry(GPS_NMEA, struct.pack(">HQ", 2, 99) + b"$GPGGA,123*4A")
+        self.broker._handle_telemetry(first)
+        self.assertGreater(self.broker.gps_output_bytes, 0)
+        self.broker._handle_telemetry(second)
+        self.assertIsNone(self.broker.configuration)
+        self.assertEqual(self.broker.gps_output_bytes, 0)
+        self.assertEqual(self.broker.next_stats_query, float("inf"))
+
+    def test_sequence_rollover_is_not_reported_as_a_gap(self) -> None:
+        with self.assertNoLogs("Host.rnode_broker", level="WARNING"):
+            self.broker._warn_sequence_gap("IMU", 0xFFFF, 0)
+
+    def test_slow_gps_queue_stays_bounded_on_record_boundaries(self) -> None:
+        sentence = "$" + "X" * 124 + "*00"
+        for _ in range(2000):
+            self.broker._queue_gps(sentence)
+        self.assertLessEqual(self.broker.gps_output_bytes, 64 * 1024)
+        self.assertTrue(all(record.endswith(b"\r\n") for record in self.broker.gps_output))
+
+    def test_partial_imu_client_is_disconnected(self) -> None:
+        client = _PartialClient()
+        self.broker.imu_clients.add(client)  # type: ignore[arg-type]
+        sample = IMUMessage(1, 2, (0, 0, 1000), (0, 0, 0), 2500, 7)
+        self.broker._broadcast_imu(sample)
+        self.assertTrue(client.closed)
+        self.assertNotIn(client, self.broker.imu_clients)
+
+    def test_malformed_telemetry_is_discarded_but_malformed_radio_is_fatal(self) -> None:
+        malformed_telemetry = bytes((FEND, CMD_TELEMETRY, FESC, 0x01, FEND))
+        self.broker.serial_port = _PartialSerial(malformed_telemetry)
+        self.broker._read_physical()
+        self.assertEqual(self.broker.rnode_output, b"")
+
+        malformed_radio = bytes((FEND, 0x01, FESC, 0x01, FEND))
+        self.broker.serial_port = _PartialSerial(malformed_radio)
+        with self.assertRaisesRegex(ValueError, "malformed physical RNode"):
+            self.broker._read_physical()
+
+    def test_reset_frame_is_forwarded_and_clears_session(self) -> None:
+        reset = encode_kiss(0x55, b"\xf8")
+        self.broker.configuration = Configuration(GPS_ENABLED, 50, GPS_ENABLED)
+        self.broker.serial_port = _PartialSerial(reset)
+        self.broker._read_physical()
+        self.assertEqual(self.broker.rnode_output, reset)
+        self.assertIsNone(self.broker.configuration)
+        self.assertLess(self.broker.next_caps_query, time.monotonic() + 1.0)
+
+    def test_statistics_query_uses_frozen_protocol_frame(self) -> None:
+        self.broker._query_statistics()
+        frame = list(KissStreamDecoder().feed(bytes(self.broker.physical_output)))[0]
+        self.assertEqual(frame.payload, encode_telemetry(0x04))
+
+    def test_capability_queries_are_retried_as_complete_frames(self) -> None:
+        self.broker._query_capabilities()
+        self.broker._query_capabilities()
+        frames = list(KissStreamDecoder().feed(bytes(self.broker.physical_output)))
+        self.assertEqual([frame.payload for frame in frames], [encode_telemetry(0x00)] * 2)
+
+    def test_primary_output_queues_fail_loudly_at_the_bound(self) -> None:
+        self.broker.rnode_output.extend(b"x" * (1024 * 1024))
+        with self.assertRaisesRegex(BufferError, "RNode PTY consumer"):
+            self.broker._queue_rnode(b"x")
+        self.broker.physical_output.extend(b"x" * (1024 * 1024))
+        with self.assertRaisesRegex(BufferError, "physical serial consumer"):
+            self.broker._queue_physical(b"x")
 
 
 class BrokerIntegrationTest(unittest.TestCase):
@@ -208,6 +389,14 @@ class BrokerIntegrationTest(unittest.TestCase):
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, configured))
                 self._wait_for(lambda: broker.configuration is not None)
 
+                corrupt = bytearray(encode_telemetry(0x05, struct.pack(">HHIII", 1, 2, 3, 4, 5)))
+                corrupt[4] ^= 0x01
+                os.write(physical_master, encode_kiss(CMD_TELEMETRY, corrupt))
+                os.write(physical_master, bytes((FEND, CMD_TELEMETRY, FESC, 0x01, FEND)))
+                time.sleep(0.05)
+                self.assertEqual(errors, [])
+                self.assertIsNotNone(broker.configuration)
+
                 rnode_fd = os.open(runtime / "rnode", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                 gps_fd = os.open(runtime / "gps", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                 imu_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -219,7 +408,7 @@ class BrokerIntegrationTest(unittest.TestCase):
                 gps_payload = (
                     encode_telemetry(
                         GPS_NMEA,
-                        struct.pack(">HQ", 1, 1000) + b"$GPGGA,example*00",
+                        struct.pack(">HQ", 1, 1000) + b"$GPGGA,example*12",
                     )
                 )
                 os.write(physical_master, radio_frame + encode_kiss(CMD_TELEMETRY, gps_payload))
@@ -228,7 +417,7 @@ class BrokerIntegrationTest(unittest.TestCase):
 
                 readable, _, _ = select.select([gps_fd], [], [], 3.0)
                 self.assertTrue(readable)
-                self.assertEqual(os.read(gps_fd, 256), b"$GPGGA,example*00\r\n")
+                self.assertEqual(os.read(gps_fd, 256), b"$GPGGA,example*12\r\n")
 
                 imu_body = struct.pack(">HQhhhiiihB", 2, 2000, 1, 2, 1000, 4, 5, 6, 2500, 7)
                 os.write(
@@ -243,6 +432,20 @@ class BrokerIntegrationTest(unittest.TestCase):
                 os.write(rnode_fd, host_frame)
                 outbound = self._read_frame(physical_master, device_decoder, 0x01)
                 self.assertEqual(outbound.raw, host_frame)
+
+                reset_frame = encode_kiss(0x55, b"\xf8")
+                os.write(physical_master, reset_frame)
+                forwarded_reset = self._read_frame(rnode_fd, KissStreamDecoder(), 0x55)
+                self.assertEqual(forwarded_reset.raw, reset_frame)
+                self._wait_for(lambda: broker.configuration is None)
+                query_after_reset = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
+                self.assertEqual(query_after_reset.payload, encode_telemetry(0x00))
+                os.write(physical_master, encode_kiss(CMD_TELEMETRY, capabilities))
+                configure_after_reset = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
+                self.assertEqual(configure_after_reset.payload, encode_telemetry(0x02, bytes((0x03, 50))))
+                os.write(physical_master, encode_kiss(CMD_TELEMETRY, configured))
+                self._wait_for(lambda: broker.configuration is not None)
+                self.assertEqual(imu_client.recv(4096), b"")
             finally:
                 stop.set()
                 thread.join(3.0)
@@ -256,6 +459,9 @@ class BrokerIntegrationTest(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertEqual(errors, [])
+            self.assertFalse(os.path.lexists(runtime / "rnode"))
+            self.assertFalse(os.path.lexists(runtime / "gps"))
+            self.assertFalse(os.path.lexists(runtime / "imu.sock"))
 
 
 if __name__ == "__main__":
