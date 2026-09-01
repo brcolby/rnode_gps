@@ -264,6 +264,11 @@ class BrokerStateTest(unittest.TestCase):
         with self.assertNoLogs("Host.rnode_broker", level="WARNING"):
             self.broker._warn_sequence_gap("IMU", 0xFFFF, 0)
 
+    def test_sequence_gap_reports_modulo_loss(self) -> None:
+        with self.assertLogs("Host.rnode_broker", level="WARNING") as captured:
+            self.broker._warn_sequence_gap("GPS", 5, 9)
+        self.assertIn("expected 6, got 9 (3 lost)", captured.output[0])
+
     def test_slow_gps_queue_stays_bounded_on_record_boundaries(self) -> None:
         sentence = "$" + "X" * 124 + "*00"
         for _ in range(2000):
