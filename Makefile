@@ -104,6 +104,10 @@ firmware-tbeam_supreme-telemetry-usb:
 firmware-tbeam_supreme-telemetry-uart:
 	./Tools/telemetry_firmware.sh build uart
 
+test-telemetry:
+	./Tools/test_telemetry_protocol.sh
+	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 -m unittest -v Host.test_rnode_broker
+
 firmware-lora32_v10: check_bt_buffers
 	arduino-cli compile --log --fqbn esp32:esp32:ttgo-lora32 -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=\"-DBOARD_MODEL=0x39\""
 

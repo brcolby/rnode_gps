@@ -190,7 +190,9 @@ PYTHONPYCACHEPREFIX=/tmp/rnode-gps-pycache \
 ```
 
 The first command compiles the Arduino-independent C++ primitives used by the
-firmware; the second verifies the Python host codec and KISS encoding.
+firmware, including the actual command state machine and bounded telemetry
+frame parser; the second verifies the Python host codec and KISS encoding.
+`make test-telemetry` runs both suites when Python has pyserial installed.
 
 ## Hardware validation checklist
 
