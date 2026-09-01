@@ -56,6 +56,7 @@ if [[ $action == flash && $transport != uart && $# -eq 4 ]]; then
 fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root_physical=$(cd "$repo_root" && pwd -P)
 build_tmp_root=${TMPDIR:-/tmp}
 build_tmp_root=${build_tmp_root%/}
 stage_root=$(mktemp -d "$build_tmp_root/rnode-gps-build.XXXXXX")
@@ -97,6 +98,10 @@ fi
 path_map_flags="\"-ffile-prefix-map=$stage_root=/rnode-build\" \"-fdebug-prefix-map=$stage_root=/rnode-build\""
 if [[ $stage_root_physical != "$stage_root" ]]; then
   path_map_flags+=" \"-ffile-prefix-map=$stage_root_physical=/rnode-build\" \"-fdebug-prefix-map=$stage_root_physical=/rnode-build\""
+fi
+path_map_flags+=" \"-ffile-prefix-map=$repo_root=/rnode-source\" \"-fdebug-prefix-map=$repo_root=/rnode-source\""
+if [[ $repo_root_physical != "$repo_root" ]]; then
+  path_map_flags+=" \"-ffile-prefix-map=$repo_root_physical=/rnode-source\" \"-fdebug-prefix-map=$repo_root_physical=/rnode-source\""
 fi
 extra_flags+=" $path_map_flags"
 

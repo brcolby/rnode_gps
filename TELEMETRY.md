@@ -30,8 +30,9 @@ transitive library dependency. The versions are locked in `Makefile`, including
 SensorLib 0.3.3. The build wrapper stages the sketch and intermediate files in
 a correctly named temporary directory, so it works regardless of the checkout
 directory name and does not reuse an implicit Arduino build cache. Compiler
-prefix maps remove the random staging path from ELF debug data, making clean
-build artifacts byte-identical when the locked inputs are unchanged.
+prefix maps remove the random staging path and checkout path from ELF debug
+data, making clean build artifacts byte-identical when the locked inputs are
+unchanged.
 
 ## Build
 
