@@ -25,11 +25,22 @@ From the repository root, install the pinned ESP32 core and libraries:
 make prep-esp32
 ```
 
-This installs ESP32 Arduino core 2.0.17 and SensorLib 0.3.3. The build wrapper
-stages the sketch in a correctly named temporary directory, so it works even
-though this repository is checked out as `rnode_gps`.
+This installs ESP32 Arduino core 2.0.17 and exact versions of every direct and
+transitive library dependency. The versions are locked in `Makefile`, including
+SensorLib 0.3.3. The build wrapper stages the sketch and intermediate files in
+a correctly named temporary directory, so it works regardless of the checkout
+directory name and does not reuse an implicit Arduino build cache. Compiler
+prefix maps remove the random staging path from ELF debug data, making clean
+build artifacts byte-identical when the locked inputs are unchanged.
 
 ## Build
+
+First reproduce the unmodified T-Beam Supreme baseline:
+
+```bash
+./Tools/telemetry_firmware.sh build stock
+# Equivalent: make firmware-tbeam_supreme
+```
 
 For the native ESP32-S3 USB CDC connection:
 
@@ -45,7 +56,15 @@ For a 3.3 V TTL host on UART0, GPIO 43 TX and GPIO 44 RX:
 # Equivalent: make firmware-tbeam_supreme-telemetry-uart
 ```
 
-Artifacts are written to `build/telemetry-usb` or `build/telemetry-uart`.
+Artifacts are written to `build/stock-tbeam-supreme`, `build/telemetry-usb`,
+or `build/telemetry-uart`.
+
+After building all three variants, capture the complete toolchain, library,
+artifact-size, and SHA-256 manifest with:
+
+```bash
+./Tools/firmware_artifact_manifest.sh
+```
 
 ## Flash
 

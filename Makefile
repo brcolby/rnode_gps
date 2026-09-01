@@ -16,6 +16,20 @@
 # Version 2.0.17 of the Arduino ESP core is based on ESP-IDF v4.4.7
 ARDUINO_ESP_CORE_VER = 2.0.17
 
+# Exact library versions used by the T-Beam Supreme stock and telemetry builds.
+ADAFRUIT_GFX_VER = 1.12.6
+ADAFRUIT_BUSIO_VER = 1.17.4
+ADAFRUIT_SSD1306_VER = 2.5.17
+ADAFRUIT_SH110X_VER = 2.1.15
+ADAFRUIT_ST77XX_VER = 1.11.0
+ADAFRUIT_SEESAW_VER = 1.7.9
+ADAFRUIT_NEOPIXEL_VER = 1.15.5
+SD_VER = 1.3.0
+XPOWERSLIB_VER = 0.3.3
+CRYPTO_VER = 0.4.0
+SENSORLIB_VER = 0.3.3
+ARDUINO_LIB_INSTALL = arduino-cli lib install --no-deps --config-file arduino-cli.yaml
+
 # Version 3.2.0 of the Arduino ESP core is based on ESP-IDF v5.4.1
 # ARDUINO_ESP_CORE_VER = 3.2.0
 
@@ -34,13 +48,17 @@ prep-avr:
 prep-esp32:
 	arduino-cli core update-index --config-file arduino-cli.yaml
 	arduino-cli core install esp32:esp32@$(ARDUINO_ESP_CORE_VER) --config-file arduino-cli.yaml
-	arduino-cli lib install "Adafruit SSD1306"
-	arduino-cli lib install "Adafruit SH110X"
-	arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
-	arduino-cli lib install "Adafruit NeoPixel"
-	arduino-cli lib install "XPowersLib"
-	arduino-cli lib install "Crypto"
-	arduino-cli lib install "SensorLib@0.3.3"
+	$(ARDUINO_LIB_INSTALL) "Adafruit GFX Library@$(ADAFRUIT_GFX_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit BusIO@$(ADAFRUIT_BUSIO_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit SSD1306@$(ADAFRUIT_SSD1306_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit SH110X@$(ADAFRUIT_SH110X_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit ST7735 and ST7789 Library@$(ADAFRUIT_ST77XX_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit seesaw Library@$(ADAFRUIT_SEESAW_VER)"
+	$(ARDUINO_LIB_INSTALL) "Adafruit NeoPixel@$(ADAFRUIT_NEOPIXEL_VER)"
+	$(ARDUINO_LIB_INSTALL) "SD@$(SD_VER)"
+	$(ARDUINO_LIB_INSTALL) "XPowersLib@$(XPOWERSLIB_VER)"
+	$(ARDUINO_LIB_INSTALL) "Crypto@$(CRYPTO_VER)"
+	$(ARDUINO_LIB_INSTALL) "SensorLib@$(SENSORLIB_VER)"
 
 prep-samd:
 	arduino-cli core update-index --config-file arduino-cli.yaml
@@ -96,7 +114,7 @@ firmware-tdeck:
 	arduino-cli compile --log --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc" -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=\"-DBOARD_MODEL=0x3B\""
 
 firmware-tbeam_supreme:
-	arduino-cli compile --log --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc" -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=-DBOARD_MODEL=0x3D"
+	./Tools/telemetry_firmware.sh build stock
 
 firmware-tbeam_supreme-telemetry-usb:
 	./Tools/telemetry_firmware.sh build usb
