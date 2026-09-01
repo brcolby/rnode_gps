@@ -29,6 +29,7 @@ XPOWERSLIB_VER = 0.3.3
 CRYPTO_VER = 0.4.0
 SENSORLIB_VER = 0.3.3
 ARDUINO_LIB_INSTALL = arduino-cli lib install --no-deps --config-file arduino-cli.yaml
+SOAK_CYCLES ?= 256
 
 # Version 3.2.0 of the Arduino ESP core is based on ESP-IDF v5.4.1
 # ARDUINO_ESP_CORE_VER = 3.2.0
@@ -124,7 +125,10 @@ firmware-tbeam_supreme-telemetry-uart:
 
 test-telemetry:
 	./Tools/test_telemetry_protocol.sh
-	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 -m unittest -v Host.test_rnode_broker
+	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 -m unittest -v Host.test_rnode_broker Host.test_telemetry_soak
+
+telemetry-soak:
+	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 Host/telemetry_soak.py --cycles $(SOAK_CYCLES)
 
 firmware-lora32_v10: check_bt_buffers
 	arduino-cli compile --log --fqbn esp32:esp32:ttgo-lora32 -e --build-property "build.partitions=no_ota" --build-property "upload.maximum_size=2097152" --build-property "compiler.cpp.extra_flags=\"-DBOARD_MODEL=0x39\""

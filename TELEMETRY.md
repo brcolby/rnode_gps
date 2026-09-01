@@ -213,6 +213,14 @@ firmware, including the actual command state machine and bounded telemetry
 frame parser; the second verifies the Python host codec and KISS encoding.
 `make test-telemetry` runs both suites when Python has pyserial installed.
 
+For sustained deterministic PTY multiplexing with corruption, fragmentation,
+resets, rollover, delayed consumers, queue measurements, and cleanup evidence:
+
+```bash
+make telemetry-soak
+make telemetry-soak SOAK_CYCLES=4096
+```
+
 ## Hardware validation checklist
 
 Compilation and broker tests cannot prove the board wiring or sensor-library

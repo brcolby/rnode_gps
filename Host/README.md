@@ -117,3 +117,18 @@ and verifies simultaneous bidirectional RNode traffic, NMEA output, and IMU
 JSON output over one link. The standalone C++ test and the Python vector tests
 verify the CRC-protected private wire contract against
 `Host/protocol_vectors.json`.
+
+Run the deterministic, software-only fault-injection soak with:
+
+```bash
+make telemetry-soak
+# Longer example:
+make telemetry-soak SOAK_CYCLES=4096
+```
+
+The JSON report records bidirectional radio frame counts, byte counts and
+SHA-256 equality; GPS/IMU counts and drops; sequence rollover; injected CRC and
+KISS-escape faults; reset recovery latency; observed queue bounds; and broker
+thread/endpoint cleanup. The runner fragments every input with a fixed seed,
+delays both sensor consumers in bounded bursts, and fails if any ordinary RNode
+frame is rewritten or lost.
