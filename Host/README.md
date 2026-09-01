@@ -95,8 +95,11 @@ physical device directly.
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/rnode-gps-pycache \
   .venv/bin/python -m unittest -v Host.test_rnode_broker
+./Tools/test_telemetry_protocol.sh
 ```
 
 The integration test creates a pseudo-terminal as a simulated physical RNode
 and verifies simultaneous bidirectional RNode traffic, NMEA output, and IMU
-JSON output over one link.
+JSON output over one link. The standalone C++ test and the Python vector tests
+verify the CRC-protected private wire contract against
+`Host/protocol_vectors.json`.

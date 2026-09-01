@@ -40,6 +40,11 @@ GPS_NMEA = 0x10
 IMU_SAMPLE = 0x20
 ERROR = 0x7F
 
+ERROR_VERSION = 0x01
+ERROR_VALUE = 0x02
+ERROR_SUBTYPE = 0x03
+ERROR_INTEGRITY = 0x04
+
 GPS_ENABLED = 0x01
 IMU_ENABLED = 0x02
 SUPPORTED_IMU_RATES = (10, 25, 50, 100)
@@ -129,6 +134,24 @@ def encode_kiss(command: int, payload: bytes = b"") -> bytes:
     return bytes(encoded)
 
 
+def crc16_ccitt(data: bytes) -> int:
+    """Return CRC-16/CCITT-FALSE for one unescaped telemetry payload."""
+
+    crc = 0xFFFF
+    for value in data:
+        crc ^= value << 8
+        for _bit in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def encode_telemetry(subtype: int, body: bytes = b"", *, version: int = PROTOCOL_VERSION) -> bytes:
+    """Encode the integrity-protected payload carried by command 0xA0."""
+
+    content = bytes((version, subtype)) + body
+    return content + struct.pack(">H", crc16_ccitt(content))
+
+
 @dataclass(frozen=True)
 class Capabilities:
     supported: int
@@ -209,13 +232,19 @@ TelemetryMessage = Union[
 def decode_telemetry(payload: bytes) -> TelemetryMessage:
     """Decode a command-0xA0 payload from the firmware extension."""
 
-    if len(payload) < 2:
+    if len(payload) < 4:
         raise ValueError("telemetry payload is too short")
-    if payload[0] != PROTOCOL_VERSION:
-        raise ValueError(f"unsupported telemetry protocol version {payload[0]}")
+    content, received_crc = payload[:-2], struct.unpack(">H", payload[-2:])[0]
+    expected_crc = crc16_ccitt(content)
+    if received_crc != expected_crc:
+        raise ValueError(
+            f"telemetry CRC mismatch: received 0x{received_crc:04x}, expected 0x{expected_crc:04x}"
+        )
+    if content[0] != PROTOCOL_VERSION:
+        raise ValueError(f"unsupported telemetry protocol version {content[0]}")
 
-    subtype = payload[1]
-    body = payload[2:]
+    subtype = content[1]
+    body = content[2:]
     if subtype == CAPS_RESPONSE and len(body) == 5:
         return Capabilities(*body)
     if subtype == CONFIG_STATE and len(body) == 3:
@@ -364,12 +393,12 @@ class RNodeBroker:
             raise OSError(f"short serial write: {written}/{len(frame)}")
 
     def _query_capabilities(self) -> None:
-        self._send_physical(encode_kiss(CMD_TELEMETRY, bytes((PROTOCOL_VERSION, CAPS_QUERY))))
+        self._send_physical(encode_kiss(CMD_TELEMETRY, encode_telemetry(CAPS_QUERY)))
         self.next_caps_query = time.monotonic() + 2.0
 
     def _configure(self, capabilities: Capabilities) -> None:
         flags = self.enable_flags & capabilities.supported & capabilities.ready
-        payload = bytes((PROTOCOL_VERSION, CONFIG_SET, flags, self.imu_rate_hz))
+        payload = encode_telemetry(CONFIG_SET, bytes((flags, self.imu_rate_hz)))
         self._send_physical(encode_kiss(CMD_TELEMETRY, payload))
 
     def _queue_rnode(self, data: bytes) -> None:

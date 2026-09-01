@@ -14,22 +14,7 @@
 #include <SensorQMI8658.hpp>
 #include <esp_timer.h>
 #include <math.h>
-
-#define TELEMETRY_PROTOCOL_VERSION 0x01
-#define TELEMETRY_CAPS_QUERY        0x00
-#define TELEMETRY_CAPS_RESPONSE     0x01
-#define TELEMETRY_CONFIG_SET        0x02
-#define TELEMETRY_CONFIG_STATE      0x03
-#define TELEMETRY_STATS_QUERY       0x04
-#define TELEMETRY_STATS_RESPONSE    0x05
-#define TELEMETRY_GPS_NMEA          0x10
-#define TELEMETRY_IMU_SAMPLE        0x20
-#define TELEMETRY_ERROR             0x7F
-
-#define TELEMETRY_GPS_ENABLED       0x01
-#define TELEMETRY_IMU_ENABLED       0x02
-#define TELEMETRY_GPS_READY         0x01
-#define TELEMETRY_IMU_READY         0x02
+#include "TelemetryProtocol.h"
 
 HardwareSerial telemetry_gps_serial(1);
 SPIClass telemetry_imu_spi(HSPI);
@@ -45,7 +30,7 @@ uint32_t telemetry_invalid_nmea = 0;
 uint32_t telemetry_gps_drops = 0;
 uint32_t telemetry_imu_drops = 0;
 uint64_t telemetry_last_imu_us = 0;
-char telemetry_nmea[128];
+char telemetry_nmea[TELEMETRY_NMEA_MAX_BYTES];
 size_t telemetry_nmea_length = 0;
 bool telemetry_nmea_overflow = false;
 
@@ -83,8 +68,12 @@ bool telemetry_can_write(const uint8_t *payload, size_t length) {
   return Serial.availableForWrite() >= encoded_length;
 }
 
-bool telemetry_send(const uint8_t *payload, size_t length) {
-  if (!telemetry_can_write(payload, length)) return false;
+bool telemetry_send(const uint8_t *body, size_t body_length) {
+  uint8_t payload[TELEMETRY_MAX_PAYLOAD_BYTES];
+  if (body_length + TELEMETRY_CRC_BYTES > sizeof(payload)) return false;
+  memcpy(payload, body, body_length);
+  size_t length = telemetry_append_crc(payload, body_length, sizeof(payload));
+  if (length == 0 || !telemetry_can_write(payload, length)) return false;
 
   serial_write(FEND);
   serial_write(CMD_TELEMETRY);
@@ -150,22 +139,26 @@ bool telemetry_valid_rate(uint8_t rate) {
   return rate == 10 || rate == 25 || rate == 50 || rate == 100;
 }
 
-void telemetry_handle_command(const uint8_t *payload, size_t length) {
-  if (length < 2) return;
+void telemetry_handle_command(const uint8_t *payload, size_t length, bool malformed = false) {
+  if (malformed || !telemetry_valid_crc(payload, length)) {
+    telemetry_send_error(TELEMETRY_ERROR_INTEGRITY);
+    return;
+  }
+  length -= TELEMETRY_CRC_BYTES;
   if (payload[0] != TELEMETRY_PROTOCOL_VERSION) {
-    telemetry_send_error(0x01);
+    telemetry_send_error(TELEMETRY_ERROR_VERSION);
     return;
   }
 
   switch (payload[1]) {
     case TELEMETRY_CAPS_QUERY:
       if (length == 2) telemetry_send_caps();
-      else telemetry_send_error(0x02);
+      else telemetry_send_error(TELEMETRY_ERROR_VALUE);
       break;
 
     case TELEMETRY_CONFIG_SET:
       if (length != 4 || !telemetry_valid_rate(payload[3])) {
-        telemetry_send_error(0x02);
+        telemetry_send_error(TELEMETRY_ERROR_VALUE);
         break;
       }
       telemetry_enabled = payload[2] & (TELEMETRY_GPS_ENABLED | TELEMETRY_IMU_ENABLED);
@@ -177,11 +170,11 @@ void telemetry_handle_command(const uint8_t *payload, size_t length) {
 
     case TELEMETRY_STATS_QUERY:
       if (length == 2) telemetry_send_stats();
-      else telemetry_send_error(0x02);
+      else telemetry_send_error(TELEMETRY_ERROR_VALUE);
       break;
 
     default:
-      telemetry_send_error(0x03);
+      telemetry_send_error(TELEMETRY_ERROR_SUBTYPE);
       break;
   }
 }
@@ -203,7 +196,7 @@ bool telemetry_valid_nmea(const char *line, size_t length) {
       break;
     }
   }
-  if (checksum_at == 0 || checksum_at + 2 >= length) return false;
+  if (checksum_at == 0 || checksum_at + 3 != length) return false;
 
   uint8_t checksum = 0;
   for (size_t i = 1; i < checksum_at; i++) checksum ^= (uint8_t)line[i];
@@ -219,7 +212,7 @@ void telemetry_emit_nmea() {
   }
   if (!(telemetry_enabled & TELEMETRY_GPS_ENABLED)) return;
 
-  uint8_t payload[2 + 2 + 8 + sizeof(telemetry_nmea)];
+  uint8_t payload[2 + 2 + 8 + TELEMETRY_NMEA_MAX_BYTES];
   size_t offset = 0;
   payload[offset++] = TELEMETRY_PROTOCOL_VERSION;
   payload[offset++] = TELEMETRY_GPS_NMEA;
@@ -334,7 +327,7 @@ void telemetry_update() {
 
 inline void telemetry_init() {}
 inline void telemetry_update() {}
-inline void telemetry_handle_command(const uint8_t *, size_t) {}
+inline void telemetry_handle_command(const uint8_t *, size_t, bool = false) {}
 
 #endif
 

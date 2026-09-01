@@ -27,6 +27,7 @@ char bt_dh[16] = {0};
 
 FIFOBuffer serialFIFO;
 uint8_t serialBuffer[CONFIG_UART_BUFFER_SIZE+1];
+bool telemetry_frame_malformed = false;
 
 FIFOBuffer16 packet_starts;
 uint16_t packet_starts_buf[CONFIG_QUEUE_MAX_LENGTH+1];
@@ -775,7 +776,10 @@ void transmit(uint16_t size) {
 void serial_callback(uint8_t sbyte) {
   if (IN_FRAME && sbyte == FEND && command == CMD_TELEMETRY) {
     IN_FRAME = false;
-    telemetry_handle_command(cmdbuf, frame_len);
+    bool malformed = telemetry_frame_malformed || ESCAPE;
+    ESCAPE = false;
+    telemetry_frame_malformed = false;
+    telemetry_handle_command(cmdbuf, frame_len, malformed);
   } else if (IN_FRAME && sbyte == FEND && command == CMD_DATA) {
     IN_FRAME = false;
 
@@ -799,6 +803,8 @@ void serial_callback(uint8_t sbyte) {
     IN_FRAME = true;
     command = CMD_UNKNOWN;
     frame_len = 0;
+    ESCAPE = false;
+    telemetry_frame_malformed = false;
   } else if (IN_FRAME && frame_len < MTU) {
     // Have a look at the command byte first
     if (frame_len == 0 && command == CMD_UNKNOWN) {
@@ -827,10 +833,12 @@ void serial_callback(uint8_t sbyte) {
       } else {
         if (ESCAPE) {
           if (sbyte == TFEND) sbyte = FEND;
-          if (sbyte == TFESC) sbyte = FESC;
+          else if (sbyte == TFESC) sbyte = FESC;
+          else telemetry_frame_malformed = true;
           ESCAPE = false;
         }
         if (frame_len < CMD_L) cmdbuf[frame_len++] = sbyte;
+        else telemetry_frame_malformed = true;
       }
     } else if (command == CMD_FREQUENCY) {
       if (sbyte == FESC) {

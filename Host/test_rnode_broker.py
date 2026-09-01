@@ -28,9 +28,14 @@ from Host.rnode_broker import (
     KissStreamDecoder,
     RNodeBroker,
     Statistics,
+    crc16_ccitt,
     decode_telemetry,
     encode_kiss,
+    encode_telemetry,
 )
+
+
+PROTOCOL_VECTORS = Path(__file__).with_name("protocol_vectors.json")
 
 
 class KissCodecTest(unittest.TestCase):
@@ -56,8 +61,13 @@ class KissCodecTest(unittest.TestCase):
 
 
 class TelemetryCodecTest(unittest.TestCase):
+    def test_crc_matches_ccitt_false_check_value(self) -> None:
+        self.assertEqual(crc16_ccitt(b"123456789"), 0x29B1)
+
     def test_decodes_gps(self) -> None:
-        payload = bytes((PROTOCOL_VERSION, GPS_NMEA)) + struct.pack(">HQ", 7, 123456) + b"$GPRMC,example*00"
+        payload = encode_telemetry(
+            GPS_NMEA, struct.pack(">HQ", 7, 123456) + b"$GPRMC,example*00"
+        )
         message = decode_telemetry(payload)
         self.assertIsInstance(message, GPSMessage)
         assert isinstance(message, GPSMessage)
@@ -67,7 +77,7 @@ class TelemetryCodecTest(unittest.TestCase):
 
     def test_decodes_imu_and_emits_jsonl(self) -> None:
         body = struct.pack(">HQhhhiiihB", 9, 987654, 100, -200, 1000, 1001, -2002, 3003, 2450, 7)
-        message = decode_telemetry(bytes((PROTOCOL_VERSION, IMU_SAMPLE)) + body)
+        message = decode_telemetry(encode_telemetry(IMU_SAMPLE, body))
         self.assertIsInstance(message, IMUMessage)
         assert isinstance(message, IMUMessage)
         self.assertEqual(message.accel_mg, (100, -200, 1000))
@@ -78,12 +88,54 @@ class TelemetryCodecTest(unittest.TestCase):
 
     def test_rejects_wrong_length(self) -> None:
         with self.assertRaises(ValueError):
-            decode_telemetry(bytes((PROTOCOL_VERSION, IMU_SAMPLE, 0x00)))
+            decode_telemetry(encode_telemetry(IMU_SAMPLE, b"\x00"))
+
+    def test_rejects_corrupt_crc(self) -> None:
+        payload = bytearray(encode_telemetry(GPS_NMEA, struct.pack(">HQ", 1, 2) + b"$G*00"))
+        payload[4] ^= 0x01
+        with self.assertRaisesRegex(ValueError, "CRC mismatch"):
+            decode_telemetry(bytes(payload))
 
     def test_decodes_statistics(self) -> None:
         body = struct.pack(">HHIII", 12, 34, 56, 78, 90)
-        message = decode_telemetry(bytes((PROTOCOL_VERSION, STATS_RESPONSE)) + body)
+        message = decode_telemetry(encode_telemetry(STATS_RESPONSE, body))
         self.assertEqual(message, Statistics(12, 34, 56, 78, 90))
+
+
+class ProtocolVectorTest(unittest.TestCase):
+    def test_golden_vectors_match_payload_crc_and_kiss_encoding(self) -> None:
+        document = json.loads(PROTOCOL_VECTORS.read_text(encoding="utf-8"))
+        for vector in document["vectors"]:
+            with self.subTest(vector=vector["name"]):
+                subtype = int(vector["subtype"], 16)
+                body = bytes.fromhex(vector["body_hex"])
+                payload = bytes.fromhex(vector["payload_hex"])
+                self.assertEqual(encode_telemetry(subtype, body), payload)
+                self.assertEqual(encode_kiss(CMD_TELEMETRY, payload).hex(), vector["kiss_hex"])
+                self.assertEqual(crc16_ccitt(payload[:-2]), int.from_bytes(payload[-2:], "big"))
+
+    def test_device_response_vectors_decode(self) -> None:
+        document = json.loads(PROTOCOL_VECTORS.read_text(encoding="utf-8"))
+        device_subtypes = {0x01, 0x03, 0x05, 0x10, 0x20, 0x7F}
+        for vector in document["vectors"]:
+            subtype = int(vector["subtype"], 16)
+            if subtype in device_subtypes:
+                with self.subTest(vector=vector["name"]):
+                    decode_telemetry(bytes.fromhex(vector["payload_hex"]))
+
+    def test_invalid_vectors_fail_with_declared_host_error(self) -> None:
+        document = json.loads(PROTOCOL_VECTORS.read_text(encoding="utf-8"))
+        for vector in document["invalid_vectors"]:
+            with self.subTest(vector=vector["name"]):
+                with self.assertRaisesRegex(ValueError, vector["host_error"]):
+                    decode_telemetry(bytes.fromhex(vector["payload_hex"]))
+
+    def test_reset_session_vectors_are_complete_kiss_frames(self) -> None:
+        document = json.loads(PROTOCOL_VECTORS.read_text(encoding="utf-8"))
+        reset, first_query = document["session_vectors"]
+        reset_frames = list(KissStreamDecoder().feed(bytes.fromhex(reset["kiss_hex"])))
+        self.assertEqual([(frame.command, frame.payload) for frame in reset_frames], [(0x55, b"\xf8")])
+        self.assertEqual(first_query["kiss_hex"], encode_kiss(CMD_TELEMETRY, encode_telemetry(0x00)).hex())
 
 
 class BrokerIntegrationTest(unittest.TestCase):
@@ -145,14 +197,14 @@ class BrokerIntegrationTest(unittest.TestCase):
                 self.assertEqual(errors, [])
                 device_decoder = KissStreamDecoder()
                 query = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
-                self.assertEqual(query.payload, bytes((PROTOCOL_VERSION, 0x00)))
+                self.assertEqual(query.payload, encode_telemetry(0x00))
 
-                capabilities = bytes((PROTOCOL_VERSION, 0x01, 0x03, 0x03, 0x0F, 0x01, 0x56))
+                capabilities = encode_telemetry(0x01, bytes((0x03, 0x03, 0x0F, 0x01, 0x56)))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, capabilities))
                 configure = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
-                self.assertEqual(configure.payload, bytes((PROTOCOL_VERSION, 0x02, 0x03, 50)))
+                self.assertEqual(configure.payload, encode_telemetry(0x02, bytes((0x03, 50))))
 
-                configured = bytes((PROTOCOL_VERSION, 0x03, 0x03, 50, 0x03))
+                configured = encode_telemetry(0x03, bytes((0x03, 50, 0x03)))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, configured))
                 self._wait_for(lambda: broker.configuration is not None)
 
@@ -165,9 +217,10 @@ class BrokerIntegrationTest(unittest.TestCase):
 
                 radio_frame = encode_kiss(0x23, b"\x80")
                 gps_payload = (
-                    bytes((PROTOCOL_VERSION, GPS_NMEA))
-                    + struct.pack(">HQ", 1, 1000)
-                    + b"$GPGGA,example*00"
+                    encode_telemetry(
+                        GPS_NMEA,
+                        struct.pack(">HQ", 1, 1000) + b"$GPGGA,example*00",
+                    )
                 )
                 os.write(physical_master, radio_frame + encode_kiss(CMD_TELEMETRY, gps_payload))
                 forwarded = self._read_frame(rnode_fd, KissStreamDecoder(), 0x23)
@@ -180,7 +233,7 @@ class BrokerIntegrationTest(unittest.TestCase):
                 imu_body = struct.pack(">HQhhhiiihB", 2, 2000, 1, 2, 1000, 4, 5, 6, 2500, 7)
                 os.write(
                     physical_master,
-                    encode_kiss(CMD_TELEMETRY, bytes((PROTOCOL_VERSION, IMU_SAMPLE)) + imu_body),
+                    encode_kiss(CMD_TELEMETRY, encode_telemetry(IMU_SAMPLE, imu_body)),
                 )
                 imu_record = json.loads(imu_client.recv(4096))
                 self.assertEqual(imu_record["sequence"], 2)

@@ -93,25 +93,104 @@ Reticulum opens `/run/rnode-gps/rnode`; GPS consumers open
 
 ## KISS extension
 
-Telemetry uses command `0xA0`. Its payload is KISS-escaped like every other
-RNode command and begins with protocol version `0x01` followed by a subtype.
-All integer fields are big-endian.
+Telemetry uses private command `0xA0`. A complete frame is `C0 A0 PAYLOAD C0`,
+where `PAYLOAD` uses normal KISS escaping (`DB DC` for `C0`, `DB DD` for
+`DB`). Unknown escape pairs, a dangling escape, an oversized host command, or
+an integrity failure make the telemetry command invalid; they never change
+radio state. Ordinary non-telemetry KISS frames retain their original bytes.
 
-| Subtype | Direction | Payload after version/subtype |
-| --- | --- | --- |
-| `0x00` capabilities query | host to device | empty |
-| `0x01` capabilities | device to host | supported flags, ready flags, rate mask, RNode major, RNode minor |
-| `0x02` configure | host to device | enable flags, IMU rate in Hz |
-| `0x03` configuration | device to host | active flags, IMU rate, ready flags |
-| `0x04` statistics query | host to device | empty |
-| `0x05` statistics | device to host | GPS seq u16, IMU seq u16, invalid NMEA u32, GPS drops u32, IMU drops u32 |
-| `0x10` GPS NMEA | device to host | seq u16, monotonic microseconds u64, NMEA bytes without CR/LF |
-| `0x20` IMU sample | device to host | seq u16, monotonic microseconds u64, accel 3xi16 mg, gyro 3xi32 mdps, temperature i16 centi-C, status u8 |
-| `0x7f` error | device to host | error code |
+The unescaped payload is:
+
+```
+version u8 | subtype u8 | body | crc16 u16
+```
+
+Version is `0x01`. All integers, including the trailing CRC, are big-endian.
+The CRC is CRC-16/CCITT-FALSE over version, subtype, and body: polynomial
+`0x1021`, initial value `0xffff`, no reflection, and no final XOR. Its standard
+`123456789` check value is `0x29b1`. KISS delimiters, the `0xA0` command byte,
+and escape bytes are not part of the CRC.
+
+| Subtype | Direction | Body after version/subtype | Body bytes | Total payload bytes |
+| --- | --- | --- | ---: | ---: |
+| `0x00` capabilities query | host to device | empty | 0 | 4 |
+| `0x01` capabilities | device to host | supported flags, ready flags, rate mask, RNode major, RNode minor | 5 | 9 |
+| `0x02` configure | host to device | enable flags, IMU rate in Hz | 2 | 6 |
+| `0x03` configuration | device to host | active flags, IMU rate, ready flags | 3 | 7 |
+| `0x04` statistics query | host to device | empty | 0 | 4 |
+| `0x05` statistics | device to host | GPS seq u16, IMU seq u16, invalid NMEA u32, GPS drops u32, IMU drops u32 | 16 | 20 |
+| `0x10` GPS NMEA | device to host | seq u16, monotonic microseconds u64, NMEA bytes without CR/LF | 10 + N | 14 + N |
+| `0x20` IMU sample | device to host | seq u16, monotonic microseconds u64, accel 3xi16 mg, gyro 3xi32 mdps, temperature i16 centi-C, status u8 | 31 | 35 |
+| `0x7f` error | device to host | error code | 1 | 5 |
 
 Enable flag bit 0 is GPS and bit 1 is IMU. Supported IMU rates are 10, 25,
 50, and 100 Hz. Axis values use the QMI8658's native board orientation; frame
 conversion and sensor fusion belong on the host.
+
+The capabilities rate mask uses bits 0 through 3 for 10, 25, 50, and 100 Hz.
+Unknown flag and rate-mask bits must be ignored. The configuration response is
+authoritative: it reports the subset that is both requested and ready. GPS
+NMEA is 7 to 128 ASCII bytes, starts with `$` or `!`, ends immediately after
+two checksum hex digits, and excludes CR/LF. The maximum unescaped telemetry
+payload is therefore 142 bytes.
+
+Error codes are `0x01` unsupported version, `0x02` invalid length or value,
+`0x03` unsupported subtype, and `0x04` malformed framing or bad CRC. A host
+must treat unknown error codes as failures. The firmware can answer a damaged
+request with an integrity error, but the host never assumes that an error
+response will survive the same faulty link.
+
+## Session and recovery contract
+
+Telemetry is disabled on every boot. After the stock RNode startup/reset
+frame, or after opening a link with unknown state, the broker repeatedly sends
+a capabilities query. It sends configuration only after a valid capabilities
+response and considers negotiation complete only after a valid configuration
+response matches the requested rate and the ready subset. A stock RNode does
+not understand `0xA0`; timeout is therefore a clean capability failure, not
+permission to pass telemetry bytes into Reticulum.
+
+A device reset clears enabled flags, sequence numbers, counters, and the
+device monotonic epoch. The broker clears its corresponding session state and
+renegotiates. Duplicate capabilities or configuration frames are idempotent.
+Malformed or corrupt telemetry frames are discarded. Radio frames before,
+during, and after renegotiation continue through the broker.
+
+GPS and IMU sequences start at zero, increment for every attempted emission,
+and wrap from `65535` to zero. Thus a modulo-65536 gap exposes device-side
+backpressure drops as well as link loss. The five statistics values are
+snapshots; 32-bit counters also wrap modulo their field width. Sequence
+rollover is not a reset. Only a reset indication or a backwards device clock
+that cannot belong to the current epoch starts a new session.
+
+`device_time_us` is the ESP32 monotonic microsecond clock sampled when a valid
+NMEA sentence is emitted or immediately before an IMU read. It is not GNSS
+UTC, PPS-disciplined time, or the exact sensor conversion instant. GNSS UTC
+remains inside applicable NMEA sentences. Host records may add receive wall
+time, but consumers must retain the device timestamp and session boundary
+rather than treating host arrival time as sensor time.
+
+Telemetry is best-effort and cannot reserve space needed by radio output. The
+firmware emits a telemetry frame only when the complete worst-case escaped
+frame fits the serial transmit buffer; otherwise it increments the relevant
+drop counter. This makes frame insertion atomic at the firmware loop level and
+prevents a sensor sample from blocking ordinary RNode work.
+
+## Conformance vectors
+
+[`Host/protocol_vectors.json`](Host/protocol_vectors.json) is the canonical
+machine-readable set of payload and full KISS frames, including boundary
+integers, sequence rollover values, escaping, and invalid inputs. Run both
+implementations against it before building firmware:
+
+```bash
+./Tools/test_telemetry_protocol.sh
+PYTHONPYCACHEPREFIX=/tmp/rnode-gps-pycache \
+  python3 -m unittest -v Host.test_rnode_broker.ProtocolVectorTest
+```
+
+The first command compiles the Arduino-independent C++ primitives used by the
+firmware; the second verifies the Python host codec and KISS encoding.
 
 ## Hardware validation checklist
 
