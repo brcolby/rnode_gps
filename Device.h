@@ -214,8 +214,18 @@ bool device_firmware_ok() {
 }
 
 #if MCU_VARIANT == MCU_ESP32 || MCU_VARIANT == MCU_NRF52
+bool device_identity_ready() {
+  #if defined(RNODE_GPS_WIRED_ONLY)
+    // Wired-only firmware intentionally does not initialise Bluetooth. Device
+    // validation must therefore not wait for the Bluetooth-ready flag.
+    return true;
+  #else
+    return bt_ready;
+  #endif
+}
+
 bool device_init() {
-  if (bt_ready) {
+  if (device_identity_ready()) {
     #if MCU_VARIANT == MCU_ESP32
     for (uint8_t i=0; i<EEPROM_SIG_LEN; i++){dev_eeprom_signature[i]=EEPROM.read(eeprom_addr(ADDR_SIGNATURE+i));}
     mbedtls_md_context_t ctx;
@@ -225,6 +235,11 @@ bool device_init() {
     mbedtls_md_starts(&ctx);
     #if HAS_BLUETOOTH == true || HAS_BLE == true
       mbedtls_md_update(&ctx, dev_bt_mac, BT_DEV_ADDR_LEN);
+    #elif defined(RNODE_GPS_WIRED_ONLY)
+      // Existing ESP32 device signatures include the six-byte, zero-initialised
+      // dev_bt_mac buffer. Preserve that identity input without starting BLE.
+      const uint8_t wired_device_mac[6] = {0};
+      mbedtls_md_update(&ctx, wired_device_mac, sizeof(wired_device_mac));
     #else
       // TODO: Get from BLE stack instead
       // mbedtls_md_update(&ctx, dev_bt_mac, BT_DEV_ADDR_LEN);

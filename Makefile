@@ -125,7 +125,7 @@ firmware-tbeam_supreme-telemetry-uart:
 
 test-telemetry:
 	./Tools/test_telemetry_protocol.sh
-	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 -m unittest -v Host.test_rnode_broker Host.test_telemetry_soak
+	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 -m unittest -v Host.test_rnode_broker Host.test_telemetry_soak Tests.test_esp_image_hash
 
 telemetry-soak:
 	PYTHONPYCACHEPREFIX=$${TMPDIR:-/tmp}/rnode-gps-pycache python3 Host/telemetry_soak.py --cycles $(SOAK_CYCLES)

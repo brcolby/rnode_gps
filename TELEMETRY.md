@@ -70,6 +70,9 @@ artifact-size, and SHA-256 manifest with:
 
 Attach the LoRa antenna before powering the board. Stop Reticulum and the host
 broker first, because the flashing tool needs exclusive access to the device.
+The wrapper also uses `rnodeconf` after upload to provision the ESP application
+hash retained by RNode's firmware-integrity check. Set `RNODECONF` to an
+explicit executable path if `rnodeconf` is not on `PATH`.
 Find the USB programming port:
 
 ```bash
@@ -86,10 +89,25 @@ Then build and flash in one command, substituting the displayed port:
 ./Tools/telemetry_firmware.sh flash usb /dev/cu.usbmodem101
 ```
 
+The wrapper prints `Firmware hash provisioned` after the runtime device has
+accepted the new image hash. Do not proceed with hardware tests if upload
+succeeds but this final provisioning step fails. Reflashing a telemetry build
+over another telemetry build is supported and does not require restoring stock
+first; normal ESP32 application upload preserves the EEPROM partition.
+
 Use `flash uart` instead of `flash usb` when the runtime host connection will
-be UART0. The board is still programmed through its USB connector. After a
-UART build boots, connect host RX to GPIO 43, host TX to GPIO 44, and host
-ground to board ground. Do not apply 5 V logic to these pins.
+be UART0. Connect the 3.3 V USB-UART adapter before flashing, then provide both
+the board's USB programming port and the adapter's UART runtime port:
+
+```bash
+./Tools/telemetry_firmware.sh flash uart \
+  /dev/cu.usbmodem101 /dev/cu.usbserial-0001
+```
+
+The board is still programmed through its USB connector, while `rnodeconf`
+provisions the firmware hash over the UART adapter after boot. Connect host RX
+to GPIO 43, host TX to GPIO 44, and host ground to board ground. Do not apply
+5 V logic to these pins.
 
 If automatic bootloader entry fails, hold BOOT, tap RESET, start the flash,
 then release BOOT when the upload begins. A first hardware trial should use

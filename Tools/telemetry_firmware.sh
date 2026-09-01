@@ -6,15 +6,17 @@ usage() {
   cat <<'EOF'
 Usage:
   Tools/telemetry_firmware.sh build {stock|usb|uart}
-  Tools/telemetry_firmware.sh flash {stock|usb|uart} SERIAL_PORT
+  Tools/telemetry_firmware.sh flash {stock|usb} USB_PORT
+  Tools/telemetry_firmware.sh flash uart USB_PORT UART_PORT
 
 Examples:
   Tools/telemetry_firmware.sh build usb
   Tools/telemetry_firmware.sh flash usb /dev/ttyACM0
+  Tools/telemetry_firmware.sh flash uart /dev/ttyACM0 /dev/ttyUSB0
 EOF
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -lt 2 || $# -gt 4 ]]; then
   usage >&2
   exit 2
 fi
@@ -22,8 +24,14 @@ fi
 action=$1
 transport=$2
 port=${3:-}
+runtime_port=${4:-$port}
 
 if [[ $action != build && $action != flash ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ $action == build && $# -ne 2 ]]; then
+  echo "Build does not accept serial-port arguments." >&2
   usage >&2
   exit 2
 fi
@@ -33,6 +41,16 @@ if [[ $transport != stock && $transport != usb && $transport != uart ]]; then
 fi
 if [[ $action == flash && -z $port ]]; then
   echo "A serial port is required when flashing." >&2
+  usage >&2
+  exit 2
+fi
+if [[ $action == flash && $transport == uart && $# -ne 4 ]]; then
+  echo "UART flashing requires the USB programming port and UART runtime port." >&2
+  usage >&2
+  exit 2
+fi
+if [[ $action == flash && $transport != uart && $# -eq 4 ]]; then
+  echo "A separate runtime port is only valid for the UART transport." >&2
   usage >&2
   exit 2
 fi
@@ -107,4 +125,29 @@ if [[ $action == flash ]]; then
     --fqbn "$fqbn" \
     --input-dir "$output_dir" \
     "$sketch_dir"
+
+  firmware_image="$output_dir/RNode_Firmware.ino.bin"
+  firmware_hash=$("${PYTHON:-python3}" "$repo_root/Tools/esp_image_hash.py" "$firmware_image")
+  rnodeconf=${RNODECONF:-rnodeconf}
+  if ! command -v "$rnodeconf" >/dev/null 2>&1; then
+    echo "The firmware was flashed, but its integrity hash was not provisioned." >&2
+    echo "Install rnodeconf or set RNODECONF=/path/to/rnodeconf, then run:" >&2
+    echo "  rnodeconf --firmware-hash $firmware_hash $port" >&2
+    exit 1
+  fi
+
+  echo "Waiting for the runtime serial port before provisioning the firmware hash..."
+  for _ in {1..20}; do
+    [[ -e $runtime_port ]] && break
+    sleep 0.5
+  done
+  if [[ ! -e $runtime_port ]]; then
+    echo "Runtime serial port did not appear: $runtime_port" >&2
+    echo "Provision the hash after rediscovering the port:" >&2
+    echo "  rnodeconf --firmware-hash $firmware_hash SERIAL_PORT" >&2
+    exit 1
+  fi
+  sleep 1
+  "$rnodeconf" --firmware-hash "$firmware_hash" "$runtime_port"
+  echo "Firmware hash provisioned: $firmware_hash"
 fi
