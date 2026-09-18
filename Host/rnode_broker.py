@@ -39,6 +39,10 @@ STATS_QUERY = 0x04
 STATS_RESPONSE = 0x05
 GPS_NMEA = 0x10
 IMU_SAMPLE = 0x20
+GNSS_NAVX_QUERY = 0x30
+GNSS_NAVX_STATE = 0x31
+GNSS_DYN_MODEL_SET = 0x32
+GNSS_DYN_MODEL_STATE = 0x33
 ERROR = 0x7F
 
 ERROR_VERSION = 0x01
@@ -270,6 +274,36 @@ class Statistics:
 
 
 @dataclass(frozen=True)
+class NavxConfiguration:
+    status: int
+    raw: bytes
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"status": self.status, "raw_hex": self.raw.hex()}
+        if self.status != 0 or len(self.raw) != 44:
+            return result
+        result.update(
+            mask=struct.unpack_from("<I", self.raw, 0)[0],
+            dynamic_model=self.raw[4],
+            fix_mode=self.raw[5],
+            min_satellites=self.raw[6],
+            max_satellites=self.raw[7],
+            min_cn0_db_hz=self.raw[8],
+            initial_fix_3d=bool(self.raw[10]),
+            min_elevation_deg=struct.unpack_from("<b", self.raw, 11)[0],
+            dead_reckoning_limit_s=self.raw[12],
+            navigation_system_mask=self.raw[13],
+            gps_week_rollover=struct.unpack_from("<H", self.raw, 14)[0],
+        )
+        names = (
+            "fixed_altitude_m", "fixed_altitude_variance_m2", "max_pdop", "max_tdop",
+            "max_position_accuracy_m2", "max_time_accuracy_m2", "static_hold_threshold_m_s",
+        )
+        result.update(zip(names, struct.unpack_from("<7f", self.raw, 16)))
+        return result
+
+
+@dataclass(frozen=True)
 class TelemetryError:
     code: int
 
@@ -280,6 +314,7 @@ TelemetryMessage = Union[
     GPSMessage,
     IMUMessage,
     Statistics,
+    NavxConfiguration,
     TelemetryError,
 ]
 
@@ -322,6 +357,12 @@ def decode_telemetry(payload: bytes) -> TelemetryMessage:
         )
     if subtype == STATS_RESPONSE and len(body) == 16:
         return Statistics(*struct.unpack(">HHIII", body))
+    if subtype == GNSS_NAVX_STATE and len(body) in (1, 45):
+        if len(body) == 45 and body[0] != 0:
+            raise ValueError("successful-length NAVX response has failure status")
+        return NavxConfiguration(body[0], body[1:])
+    if subtype == GNSS_DYN_MODEL_STATE and len(body) == 1:
+        return NavxConfiguration(body[0], b"")
     if subtype == ERROR and len(body) == 1:
         return TelemetryError(body[0])
     raise ValueError(f"invalid telemetry subtype/length: 0x{subtype:02x}/{len(body)}")
@@ -383,7 +424,7 @@ class RNodeBroker:
         imu_socket: Path = Path("/run/rnode-gps/imu.sock"),
         enable_gps: bool = True,
         enable_imu: bool = True,
-        imu_rate_hz: int = 50,
+        imu_rate_hz: int = 100,
         settle_time_s: float = 1.0,
         stats_interval_s: float = 30.0,
         negotiation_warn_s: float = 10.0,
@@ -763,7 +804,7 @@ def add_rnode_broker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rnode-link", type=Path, default=Path("/run/rnode-gps/rnode"))
     parser.add_argument("--gps-link", type=Path, default=Path("/run/rnode-gps/gps"))
     parser.add_argument("--imu-socket", type=Path, default=Path("/run/rnode-gps/imu.sock"))
-    parser.add_argument("--imu-rate", type=int, choices=SUPPORTED_IMU_RATES, default=50)
+    parser.add_argument("--imu-rate", type=int, choices=SUPPORTED_IMU_RATES, default=100)
     parser.add_argument("--no-gps", action="store_true")
     parser.add_argument("--no-imu", action="store_true")
     parser.add_argument("--settle-time", type=float, default=1.0)

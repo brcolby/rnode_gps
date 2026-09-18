@@ -17,7 +17,7 @@ struct TelemetryState {
 };
 
 inline TelemetryState telemetry_initial_state() {
-  const TelemetryState state = {0, 0, 50, 0, 0, 0, 0, 0};
+  const TelemetryState state = {0, 0, 100, 0, 0, 0, 0, 0};
   return state;
 }
 

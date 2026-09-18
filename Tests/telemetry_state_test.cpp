@@ -32,7 +32,7 @@ int main() {
   TelemetryState state = telemetry_initial_state();
   assert(state.ready == 0);
   assert(state.enabled == 0);
-  assert(state.imu_rate_hz == 50);
+  assert(state.imu_rate_hz == 100);
 
   uint8_t request[TELEMETRY_MAX_PAYLOAD_BYTES] = {0};
   uint8_t response[TELEMETRY_MAX_PAYLOAD_BYTES] = {0};

@@ -236,13 +236,13 @@ class BrokerStateTest(unittest.TestCase):
         capabilities = encode_telemetry(CAPS_RESPONSE, bytes((0x03, 0x03, 0x01, 0x01, 0x56)))
         self.broker._handle_telemetry(capabilities)
         queued = list(KissStreamDecoder().feed(bytes(self.broker.physical_output)))
-        self.assertEqual(queued[0].payload, encode_telemetry(0x02, bytes((GPS_ENABLED, 50))))
-        self.assertEqual(self.broker.expected_configuration, Configuration(GPS_ENABLED, 50, 0x03))
+        self.assertEqual(queued[0].payload, encode_telemetry(0x02, bytes((GPS_ENABLED, 100))))
+        self.assertEqual(self.broker.expected_configuration, Configuration(GPS_ENABLED, 100, 0x03))
 
-        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((0x03, 50, 0x03))))
+        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((0x03, 100, 0x03))))
         self.assertIsNone(self.broker.configuration)
-        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((GPS_ENABLED, 50, 0x03))))
-        self.assertEqual(self.broker.configuration, Configuration(GPS_ENABLED, 50, 0x03))
+        self.broker._handle_telemetry(encode_telemetry(CONFIG_STATE, bytes((GPS_ENABLED, 100, 0x03))))
+        self.assertEqual(self.broker.configuration, Configuration(GPS_ENABLED, 100, 0x03))
 
     def test_discards_sensor_samples_before_negotiation(self) -> None:
         gps = encode_telemetry(GPS_NMEA, struct.pack(">HQ", 1, 10) + b"$GPGGA,123*4A")
@@ -388,9 +388,9 @@ class BrokerIntegrationTest(unittest.TestCase):
                 capabilities = encode_telemetry(0x01, bytes((0x03, 0x03, 0x0F, 0x01, 0x56)))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, capabilities))
                 configure = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
-                self.assertEqual(configure.payload, encode_telemetry(0x02, bytes((0x03, 50))))
+                self.assertEqual(configure.payload, encode_telemetry(0x02, bytes((0x03, 100))))
 
-                configured = encode_telemetry(0x03, bytes((0x03, 50, 0x03)))
+                configured = encode_telemetry(0x03, bytes((0x03, 100, 0x03)))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, configured))
                 self._wait_for(lambda: broker.configuration is not None)
 
@@ -447,7 +447,7 @@ class BrokerIntegrationTest(unittest.TestCase):
                 self.assertEqual(query_after_reset.payload, encode_telemetry(0x00))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, capabilities))
                 configure_after_reset = self._read_frame(physical_master, device_decoder, CMD_TELEMETRY)
-                self.assertEqual(configure_after_reset.payload, encode_telemetry(0x02, bytes((0x03, 50))))
+                self.assertEqual(configure_after_reset.payload, encode_telemetry(0x02, bytes((0x03, 100))))
                 os.write(physical_master, encode_kiss(CMD_TELEMETRY, configured))
                 self._wait_for(lambda: broker.configuration is not None)
                 self.assertEqual(imu_client.recv(4096), b"")

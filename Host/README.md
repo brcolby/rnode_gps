@@ -28,7 +28,7 @@ no `sudo`:
   --rnode-link /tmp/rnode-gps/rnode \
   --gps-link /tmp/rnode-gps/gps \
   --imu-socket /tmp/rnode-gps/imu.sock \
-  --imu-rate 50
+  --imu-rate 100
 ```
 
 Leave this process running while Reticulum or a sensor fixture uses the PTYs
@@ -36,7 +36,7 @@ and socket. Stop it with Ctrl-C before flashing, running `rnodeconf`, or using
 a direct serial smoke test. A broker-mode smoke test validates endpoints from
 this process; it does not launch the broker itself.
 
-The broker requests GPS plus 50 Hz IMU by default. Use `--no-gps`, `--no-imu`,
+The broker requests GPS plus 100 Hz IMU by default. Use `--no-gps`, `--no-imu`,
 or `--imu-rate {10,25,50,100}` to change that. It polls firmware drop
 statistics every 30 seconds; `--stats-interval` changes that interval and
 `--negotiation-warn` changes the default 10-second warning threshold.

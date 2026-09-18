@@ -14,6 +14,7 @@
 #include <SensorQMI8658.hpp>
 #include <esp_timer.h>
 #include <math.h>
+#include "L76KProtocol.h"
 #include "TelemetryFrameParser.h"
 #include "TelemetryState.h"
 
@@ -27,6 +28,12 @@ uint64_t telemetry_last_imu_us = 0;
 char telemetry_nmea[TELEMETRY_NMEA_MAX_BYTES];
 size_t telemetry_nmea_length = 0;
 bool telemetry_nmea_overflow = false;
+L76KCasicParser telemetry_casic_parser;
+bool telemetry_navx_pending = false;
+bool telemetry_navx_setting = false;
+uint64_t telemetry_navx_started_us = 0;
+
+#define TELEMETRY_NAVX_TIMEOUT_US 1000000ULL
 
 inline void telemetry_put_u16(uint8_t *buffer, size_t &offset, uint16_t value) {
   buffer[offset++] = value >> 8;
@@ -90,6 +97,40 @@ void telemetry_frame_push(uint8_t value) {
 void telemetry_frame_finish() {
   bool valid = telemetry_frame.finish();
   uint8_t response[20];
+  if (valid && telemetry_valid_crc(telemetry_frame.data, telemetry_frame.length)) {
+    size_t content_length = telemetry_frame.length - TELEMETRY_CRC_BYTES;
+    if (content_length >= 2 &&
+        telemetry_frame.data[0] == TELEMETRY_PROTOCOL_VERSION &&
+        (telemetry_frame.data[1] == TELEMETRY_GNSS_NAVX_QUERY ||
+         telemetry_frame.data[1] == TELEMETRY_GNSS_DYN_MODEL_SET)) {
+      bool setting = telemetry_frame.data[1] == TELEMETRY_GNSS_DYN_MODEL_SET;
+      size_t expected_length = setting ? 3 : 2;
+      if (content_length != expected_length ||
+          (setting && telemetry_frame.data[2] > 7)) {
+        size_t response_length = telemetry_state_error(
+          TELEMETRY_ERROR_VALUE, response, sizeof(response)
+        );
+        if (response_length > 0) telemetry_send_encoded(response, response_length);
+      } else if (telemetry_navx_pending) {
+        uint8_t body[] = {TELEMETRY_PROTOCOL_VERSION, TELEMETRY_GNSS_NAVX_STATE, TELEMETRY_NAVX_BUSY};
+        telemetry_send(body, sizeof(body));
+      } else {
+        telemetry_navx_pending = true;
+        telemetry_navx_setting = setting;
+        telemetry_navx_started_us = (uint64_t)esp_timer_get_time();
+        if (setting) {
+          uint8_t frame[54];
+          size_t frame_length = l76k_build_navx_dynamic_model_set(
+            telemetry_frame.data[2], frame, sizeof(frame)
+          );
+          telemetry_gps_serial.write(frame, frame_length);
+        } else {
+          telemetry_gps_serial.write(L76K_CFG_NAVX_QUERY, sizeof(L76K_CFG_NAVX_QUERY));
+        }
+      }
+      return;
+    }
+  }
   size_t response_length = telemetry_process_command(
     telemetry_state,
     telemetry_frame.data,
@@ -101,6 +142,52 @@ void telemetry_frame_finish() {
     sizeof(response)
   );
   if (response_length > 0) telemetry_send_encoded(response, response_length);
+}
+
+void telemetry_emit_navx(uint8_t status, const uint8_t *payload = NULL, size_t length = 0) {
+  uint8_t body[3 + L76K_NAVX_PAYLOAD_BYTES];
+  if (length > L76K_NAVX_PAYLOAD_BYTES) length = L76K_NAVX_PAYLOAD_BYTES;
+  size_t offset = 0;
+  body[offset++] = TELEMETRY_PROTOCOL_VERSION;
+  body[offset++] = telemetry_navx_setting ? TELEMETRY_GNSS_DYN_MODEL_STATE : TELEMETRY_GNSS_NAVX_STATE;
+  body[offset++] = status;
+  if (payload != NULL && length > 0) {
+    memcpy(body + offset, payload, length);
+    offset += length;
+  }
+  telemetry_send(body, offset);
+  telemetry_navx_pending = false;
+  telemetry_navx_setting = false;
+}
+
+void telemetry_observe_casic(L76KCasicEvent event) {
+  if (!telemetry_navx_pending || event == L76K_CASIC_NONE) return;
+  if (event == L76K_CASIC_BAD_FRAME) {
+    telemetry_emit_navx(TELEMETRY_NAVX_BAD_FRAME);
+    return;
+  }
+  if (!telemetry_navx_setting &&
+      telemetry_casic_parser.message_class == L76K_CASIC_CLASS_CFG &&
+      telemetry_casic_parser.message_id == L76K_CASIC_ID_NAVX &&
+      telemetry_casic_parser.length == L76K_NAVX_PAYLOAD_BYTES) {
+    telemetry_emit_navx(
+      TELEMETRY_NAVX_OK,
+      telemetry_casic_parser.payload,
+      telemetry_casic_parser.length
+    );
+  } else if (telemetry_casic_parser.message_class == L76K_CASIC_CLASS_ACK &&
+             telemetry_casic_parser.message_id == L76K_CASIC_ID_ACK &&
+             telemetry_casic_parser.length >= 2 &&
+             telemetry_casic_parser.payload[0] == L76K_CASIC_CLASS_CFG &&
+             telemetry_casic_parser.payload[1] == L76K_CASIC_ID_NAVX) {
+    telemetry_emit_navx(TELEMETRY_NAVX_OK);
+  } else if (telemetry_casic_parser.message_class == L76K_CASIC_CLASS_ACK &&
+             telemetry_casic_parser.message_id == L76K_CASIC_ID_NACK &&
+             telemetry_casic_parser.length >= 2 &&
+             telemetry_casic_parser.payload[0] == L76K_CASIC_CLASS_CFG &&
+             telemetry_casic_parser.payload[1] == L76K_CASIC_ID_NAVX) {
+    telemetry_emit_navx(TELEMETRY_NAVX_NACK);
+  }
 }
 
 void telemetry_emit_nmea() {
@@ -124,7 +211,13 @@ void telemetry_emit_nmea() {
 
 void telemetry_drain_gps() {
   while (telemetry_gps_serial.available()) {
-    char value = (char)telemetry_gps_serial.read();
+    uint8_t raw_value = (uint8_t)telemetry_gps_serial.read();
+    L76KCasicEvent casic_event;
+    if (telemetry_casic_parser.consume(raw_value, casic_event)) {
+      telemetry_observe_casic(casic_event);
+      continue;
+    }
+    char value = (char)raw_value;
     if (value == '\n') {
       if (!telemetry_nmea_overflow && telemetry_nmea_length > 0) telemetry_emit_nmea();
       else if (telemetry_nmea_overflow) telemetry_state.invalid_nmea++;
@@ -209,6 +302,10 @@ void telemetry_init() {
 
 void telemetry_update() {
   telemetry_drain_gps();
+  if (telemetry_navx_pending &&
+      (uint64_t)esp_timer_get_time() - telemetry_navx_started_us >= TELEMETRY_NAVX_TIMEOUT_US) {
+    telemetry_emit_navx(TELEMETRY_NAVX_TIMEOUT);
+  }
   if (!(telemetry_state.enabled & TELEMETRY_IMU_ENABLED) ||
       !(telemetry_state.ready & TELEMETRY_IMU_READY)) return;
 

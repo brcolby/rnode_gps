@@ -139,7 +139,7 @@ writable endpoints:
   --rnode-link /tmp/rnode-gps/rnode \
   --gps-link /tmp/rnode-gps/gps \
   --imu-socket /tmp/rnode-gps/imu.sock \
-  --imu-rate 50
+  --imu-rate 100
 ```
 
 The broker must remain running while consumers use those endpoints. It is the
@@ -176,6 +176,10 @@ and escape bytes are not part of the CRC.
 | `0x05` statistics | device to host | GPS seq u16, IMU seq u16, invalid NMEA u32, GPS drops u32, IMU drops u32 | 16 | 20 |
 | `0x10` GPS NMEA | device to host | seq u16, monotonic microseconds u64, NMEA bytes without CR/LF | 10 + N | 14 + N |
 | `0x20` IMU sample | device to host | seq u16, monotonic microseconds u64, accel 3xi16 mg, gyro 3xi32 mdps, temperature i16 centi-C, status u8 | 31 | 35 |
+| `0x30` GNSS NAVX query | host to device | empty | 0 | 4 |
+| `0x31` GNSS NAVX state | device to host | status u8, followed by the raw 44-byte little-endian CASIC CFG-NAVX payload on success | 1 or 45 | 5 or 49 |
+| `0x32` GNSS dynamic-model set | host to device | documented CFG-NAVX dynamic-model value u8 (0 through 7) | 1 | 5 |
+| `0x33` GNSS dynamic-model state | device to host | status u8 | 1 | 5 |
 | `0x7f` error | device to host | error code | 1 | 5 |
 
 Enable flag bit 0 is GPS and bit 1 is IMU. Supported IMU rates are 10, 25,
@@ -194,6 +198,14 @@ Error codes are `0x01` unsupported version, `0x02` invalid length or value,
 must treat unknown error codes as failures. The firmware can answer a damaged
 request with an integrity error, but the host never assumes that an error
 response will survive the same faulty link.
+
+The NAVX query is read-only and never saves or changes receiver configuration.
+The dynamic-model setter applies only CFG-NAVX mask bit 0 and does not issue
+CFG-CFG, so it does not save the change to receiver nonvolatile storage.
+Its status is `0x00` success, `0x01` timeout, `0x02` receiver NACK, `0x03`
+invalid CASIC response, or `0x04` query already in progress. The L76K-specific
+public protocol does not promise CFG-NAVX support, so timeout or NACK is a valid
+hardware result rather than a telemetry transport failure.
 
 ## Session and recovery contract
 
