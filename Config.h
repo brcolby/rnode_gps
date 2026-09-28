@@ -72,7 +72,12 @@
     #endif
 
 	// MCU independent configuration parameters
-	const long serial_baudrate  = 115200;
+    #if defined(RNODE_GPS_HOST_UART)
+      // Dedicated wired telemetry transport; USB/stock retain their original rate.
+      const long serial_baudrate = 230400;
+    #else
+      const long serial_baudrate = 115200;
+    #endif
 
 	// SX1276 RSSI offset to get dBm value from
 	// packet RSSI register

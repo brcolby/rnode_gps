@@ -1,0 +1,15 @@
+[Unit]
+Description=RNode GPS/IMU serial broker
+After=dev-ttyACM0.device
+Before=rnsd.service
+
+[Service]
+Type=simple
+RuntimeDirectory=rnode-gps
+WorkingDirectory=/opt/rnode_gps
+ExecStart=/opt/rnode_gps/.venv/bin/python /opt/rnode_gps/Host/rnode_broker.py --port /dev/ttyACM0
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

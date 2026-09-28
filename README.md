@@ -6,6 +6,98 @@
 
 This is the open firmware that powers RNode devices.
 
+## T-Beam Supreme GPS/IMU fork
+
+This fork adds an opt-in T-Beam Supreme build that multiplexes normal RNode
+traffic, GPS NMEA, and QMI8658 IMU samples over one USB or UART serial link.
+See [TELEMETRY.md](TELEMETRY.md) for build, flash, host setup, and protocol
+details. The upstream build targets remain unchanged.
+
+### Flashing the GPS/IMU firmware
+
+Current UART candidate: **230400 baud**, 3.3 V TTL, GPIO43 TX / GPIO44 RX.
+USB uses 115200. IMU defaults to a separate 100 Hz acquisition task; GPS and
+IMU carry source timestamps. Hardware acceptance is still pending; this is not
+a guarantee of loss-free operation. Earlier UART images used 460800, so match
+the baud to the flashed image. Do not enable a serial console on the Pi UART.
+
+Attach both boards' correct LoRa antennas before radio operation. Stop all
+serial consumers before flashing. Back up EEPROM with `rnodeconf --eeprom-backup`
+using the currently installed image's runtime port and baud. Do not erase all
+flash or run autoinstall just to switch between these USB/UART builds.
+
+Install Arduino CLI, then run `make prep-esp32` for pinned build dependencies.
+Use a Python environment with `rns`, `pyserial`, and (for Pi UART flashing)
+`esptool==4.5.1` installed. Commands below run from this repository root.
+
+#### USB firmware: direct Mac/Linux USB connection
+
+```bash
+Tools/telemetry_firmware.sh build usb
+# Discover the actual port with arduino-cli board list; Linux often uses ttyACM0.
+PYTHON=python3 RNODECONF=rnodeconf \
+  Tools/telemetry_firmware.sh flash usb /dev/cu.usbmodem101
+```
+
+The flash wrapper rebuilds, uploads, and provisions the firmware integrity hash.
+Require its final `Firmware hash provisioned` message before testing. No Pi or
+USB-to-UART adapter is required for the USB build.
+
+#### UART firmware: flash through the Pi, keeping GPIO wiring
+
+On a Pi Zero 2 W, enable UART, disable the GPIO serial console and onboard
+Bluetooth to reserve PL011 (`dtoverlay=disable-bt`, `enable_uart=1`), then reboot.
+USB gadget and Wi-Fi can remain enabled. Verify `/dev/serial0` resolves to
+`ttyAMA0` and no serial getty or broker holds it.
+
+- Pi GPIO14 TX (physical pin 8) → T-Beam GPIO44 RX.
+- Pi GPIO15 RX (physical pin 10) ← T-Beam GPIO43 TX.
+- Common GND. Use 3.3 V logic; retain independent device power. No adapter needed.
+
+Build on the Mac, then copy the image and the two hash helper scripts to a
+checkout/staging directory on the target Pi:
+
+```bash
+Tools/telemetry_firmware.sh build uart
+python3 Tools/esp_image_hash.py build/telemetry-uart/RNode_Firmware.ino.bin
+# Copy build/telemetry-uart/RNode_Firmware.ino.bin to firmware-uart.bin on the Pi.
+```
+
+On the target T-Beam, hold BOOT, tap/release RESET, then release BOOT. On that Pi:
+
+```bash
+python3 -m esptool --chip esp32s3 --port /dev/serial0 --baud 115200 \
+  --before no_reset --after no_reset write_flash 0x10000 firmware-uart.bin
+```
+
+This app-only update assumes an already provisioned RNode Supreme with the
+compatible partition layout used by this fork. For initial installation or a
+different partition layout, use the full USB upload procedure in [TELEMETRY.md](TELEMETRY.md).
+The bootloader starts at 115200 regardless of the firmware's runtime baud.
+Require `Hash of data verified`, then press **RESET only** and provision:
+
+```bash
+FIRMWARE_HASH=$(python3 Tools/esp_image_hash.py firmware-uart.bin)
+python3 Tools/rnodeconf_uart.py --baud 230400 \
+  --firmware-hash "$FIRMWARE_HASH" /dev/serial0
+python3 Tools/rnodeconf_uart.py --baud 230400 --info /dev/serial0
+```
+
+Use the ESP image hash helper, not `sha256sum`, for provisioning: the embedded
+application digest differs from the whole-file checksum used to verify copying.
+An old stored hash can produce `firmware corrupt` until provisioning completes.
+Device-signature validation is separate and requires the original trusted
+signing key; do not reinitialize EEPROM to hide a missing-key warning.
+
+For UART runtime start the broker with `--port /dev/serial0 --baud 230400
+--imu-rate 100`; Reticulum connects to its PTY, not directly to `/dev/serial0`.
+See [Host/README.md](Host/README.md) for endpoints and service configuration.
+
+For recovery to USB, reconnect the board's USB port and run the USB flash
+procedure, using BOOT/RESET if needed to enter the ROM loader. UART firmware
+does not remove ROM USB recovery. Keep the EEPROM backup and never blindly
+restore another board's EEPROM. Both Pis can remain connected by USB gadget.
+
 An RNode is an open, free and unrestricted digital radio transceiver. It enables anyone to send and receive any kind of data over both short and very long distances. RNodes can be used with many different kinds of programs and systems, but they are especially well suited for use with [Reticulum](https://reticulum.network).
 
 RNode is not a product, and not any *one* specific device in particular. It is a system that is easy to replicate across space and time, that produces highly functional communications tools, which respects user autonomy and empowers individuals and communities to protect their sovereignty, privacy and ability to communicate and exchange data and ideas freely.

@@ -108,6 +108,9 @@
   #define SEQ_UNSET       0xFF
 
   #define CMD_ERROR           0x90
+  // GPS/IMU telemetry multiplexing. This command is only handled by builds
+  // compiled with RNODE_GPS_TELEMETRY and remains unknown to stock firmware.
+  #define CMD_TELEMETRY       0xA0
   #define ERROR_INITRADIO     0x01
   #define ERROR_TXFAILED      0x02
   #define ERROR_EEPROM_LOCKED 0x03

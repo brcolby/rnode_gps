@@ -16,6 +16,14 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include "Utilities.h"
+#include "Telemetry.h"
+
+#if BOARD_MODEL == BOARD_TBEAM_S_V1 && defined(RNODE_GPS_WIRED_ONLY)
+// The Supreme status display normally derives its short identifier from the
+// BLE device hash. Wired-only builds do not link Bluetooth.h, so retain the
+// display contract with a zeroed, non-radio placeholder.
+char bt_dh[16] = {0};
+#endif
 
 FIFOBuffer serialFIFO;
 uint8_t serialBuffer[CONFIG_UART_BUFFER_SIZE+1];
@@ -63,6 +71,11 @@ void setup() {
     boot_seq();
     EEPROM.begin(EEPROM_SIZE);
     Serial.setRxBufferSize(CONFIG_UART_BUFFER_SIZE);
+    #if defined(RNODE_GPS_HOST_UART)
+      // Reserve room for radio packets plus a burst of complete GPS/IMU frames.
+      // Without a software ring, availableForWrite() exposes only the tiny FIFO.
+      Serial.setTxBufferSize(4096);
+    #endif
 
     #if BOARD_MODEL == BOARD_TDECK
       pinMode(pin_poweron, OUTPUT);
@@ -144,7 +157,7 @@ void setup() {
     input_init();
   #endif
 
-  #if HAS_NP == false
+  #if HAS_NP == false && !(BOARD_MODEL == BOARD_TBEAM_S_V1 && defined(RNODE_GPS_HOST_UART))
     pinMode(pin_led_rx, OUTPUT);
     pinMode(pin_led_tx, OUTPUT);
   #endif
@@ -259,6 +272,8 @@ void setup() {
     #if HAS_PMU == true
       pmu_ready = init_pmu();
     #endif
+
+    telemetry_init();
 
     #if HAS_BLUETOOTH || HAS_BLE == true
       bt_init();
@@ -763,7 +778,10 @@ void transmit(uint16_t size) {
 }
 
 void serial_callback(uint8_t sbyte) {
-  if (IN_FRAME && sbyte == FEND && command == CMD_DATA) {
+  if (IN_FRAME && sbyte == FEND && command == CMD_TELEMETRY) {
+    IN_FRAME = false;
+    telemetry_frame_finish();
+  } else if (IN_FRAME && sbyte == FEND && command == CMD_DATA) {
     IN_FRAME = false;
 
     if (!fifo16_isfull(&packet_starts) && queued_bytes < CONFIG_QUEUE_SIZE) {
@@ -786,6 +804,8 @@ void serial_callback(uint8_t sbyte) {
     IN_FRAME = true;
     command = CMD_UNKNOWN;
     frame_len = 0;
+    ESCAPE = false;
+    telemetry_frame_reset();
   } else if (IN_FRAME && frame_len < MTU) {
     // Have a look at the command byte first
     if (frame_len == 0 && command == CMD_UNKNOWN) {
@@ -808,6 +828,8 @@ void serial_callback(uint8_t sbyte) {
               if (queue_cursor == CONFIG_QUEUE_SIZE) queue_cursor = 0;
             }
         }
+    } else if (command == CMD_TELEMETRY) {
+      telemetry_frame_push(sbyte);
     } else if (command == CMD_FREQUENCY) {
       if (sbyte == FESC) {
             ESCAPE = true;
@@ -1742,6 +1764,8 @@ void loop() {
   #if HAS_INPUT
     input_read();
   #endif
+
+  telemetry_update();
 
   if (memory_low) {
     #if PLATFORM == PLATFORM_ESP32

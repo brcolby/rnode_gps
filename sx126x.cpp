@@ -6,6 +6,10 @@
 #if MODEM == SX1262
 #include "sx126x.h"
 
+#if defined(RNODE_GPS_TELEMETRY) && BOARD_MODEL == BOARD_TBEAM_S_V1
+extern void telemetry_update();
+#endif
+
 #if MCU_VARIANT == MCU_ESP32
   #if MCU_VARIANT == MCU_ESP32 and !defined(CONFIG_IDF_TARGET_ESP32S3)
     #include "soc/rtc_wdt.h"
@@ -474,6 +478,11 @@ int sx126x::endPacket() {
     buf[0] = 0x00;
     buf[1] = 0x00;
     executeOpcodeRead(OP_GET_IRQ_STATUS_6X, buf, 2);
+    #if defined(RNODE_GPS_TELEMETRY) && BOARD_MODEL == BOARD_TBEAM_S_V1
+      // Sensor acquisition must continue while a long LoRa packet is on air.
+      // This runs on the same task, between radio SPI transactions, not in ISR.
+      telemetry_update();
+    #endif
     yield();
   }
 

@@ -629,10 +629,18 @@
       #define OCP_TUNED 0x28
 
       #define HAS_DISPLAY true
-      #define HAS_CONSOLE true
-      #define HAS_WIFI true
+      #if defined(RNODE_GPS_WIRED_ONLY)
+        #define HAS_CONSOLE false
+      #else
+        #define HAS_CONSOLE true
+      #endif
+      #if !defined(RNODE_GPS_WIRED_ONLY)
+        #define HAS_WIFI true
+      #endif
       #define HAS_BLUETOOTH false
-      #define HAS_BLE true
+      #if !defined(RNODE_GPS_WIRED_ONLY)
+        #define HAS_BLE true
+      #endif
       #define HAS_PMU true
       #define HAS_NP false
       #define HAS_SD false
@@ -662,6 +670,16 @@
       const int SD_CS = 47;
 
       const int IMU_CS = 34;
+      const int IMU_IRQ = 33;
+
+      // The Supreme routes its GNSS module to UART1, independently of the
+      // SX1262 SPI bus. Override the generic ESP32 GPS defaults above.
+      #undef PIN_GPS_TX
+      #undef PIN_GPS_RX
+      #define PIN_GPS_TX 8
+      #define PIN_GPS_RX 9
+      #define PIN_GPS_PPS 6
+      #define PIN_GPS_WAKE 7
 
       #if HAS_NP == false
         #if defined(EXTERNAL_LEDS)
