@@ -16,8 +16,9 @@ details. The upstream build targets remain unchanged.
 ### Flashing the GPS/IMU firmware
 
 Current UART candidate: **230400 baud**, 3.3 V TTL, GPIO43 TX / GPIO44 RX.
-USB uses 115200. IMU defaults to a separate 100 Hz acquisition task; GPS and
-IMU carry source timestamps. Hardware acceptance is still pending; this is not
+USB uses 115200. The 100 Hz IMU target now preserves every locked native
+sample (nominally about 112 Hz), with acquisition bounds and explicit faults.
+Update the host broker together with the firmware; see [sensor acquisition](SENSORS.md). Hardware acceptance is still pending; this is not
 a guarantee of loss-free operation. Earlier UART images used 460800, so match
 the baud to the flashed image. Do not enable a serial console on the Pi UART.
 
@@ -50,6 +51,14 @@ Bluetooth to reserve PL011 (`dtoverlay=disable-bt`, `enable_uart=1`), then reboo
 USB gadget and Wi-Fi can remain enabled. Verify `/dev/serial0` resolves to
 `ttyAMA0` and no serial getty or broker holds it.
 
+On **crawler0 / Pi 5**, the configured GPIO14/15 UART is `/dev/ttyAMA0`
+(`dtoverlay=uart0-pi5`); `/dev/serial0` may point to the separate debug UART.
+Use `/dev/ttyAMA0` in every command below on crawler0, and resolve the robot
+project's canonical wiring map before using these instructions for another device.
+The existing TX/RX/GND wires cannot toggle BOOT/RESET: a person must perform
+the button sequence. No extra signal-level converter is required for these
+3.3 V UART pins. This does not establish safe voltage levels for other peripherals.
+
 - Pi GPIO14 TX (physical pin 8) → T-Beam GPIO44 RX.
 - Pi GPIO15 RX (physical pin 10) ← T-Beam GPIO43 TX.
 - Common GND. Use 3.3 V logic; retain independent device power. No adapter needed.
@@ -60,8 +69,13 @@ checkout/staging directory on the target Pi:
 ```bash
 Tools/telemetry_firmware.sh build uart
 python3 Tools/esp_image_hash.py build/telemetry-uart/RNode_Firmware.ino.bin
+shasum -a 256 build/telemetry-uart/RNode_Firmware.ino.bin
 # Copy build/telemetry-uart/RNode_Firmware.ino.bin to firmware-uart.bin on the Pi.
 ```
+
+Compare the whole-file SHA-256 before and after copying. Install this revision's
+`Host/rnode_broker.py` before restarting the broker: old brokers reject subtype
+`0x21`. Keep the previously working image and its hash for rollback.
 
 On the target T-Beam, hold BOOT, tap/release RESET, then release BOOT. On that Pi:
 

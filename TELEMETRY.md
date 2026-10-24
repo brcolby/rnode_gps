@@ -175,7 +175,8 @@ and escape bytes are not part of the CRC.
 | `0x04` statistics query | host to device | empty | 0 | 4 |
 | `0x05` statistics | device to host | GPS seq u16, IMU seq u16, invalid NMEA u32, GPS drops u32, IMU drops u32 | 16 | 20 |
 | `0x10` GPS NMEA | device to host | seq u16, monotonic microseconds u64, NMEA bytes without CR/LF | 10 + N | 14 + N |
-| `0x20` IMU sample | device to host | seq u16, monotonic microseconds u64, accel 3xi16 mg, gyro 3xi32 mdps, temperature i16 centi-C, status u8 | 31 | 35 |
+| `0x20` legacy IMU sample | device to host | seq u16, monotonic microseconds u64, accel 3xi16 mg, gyro 3xi32 mdps, temperature i16 centi-C, status u8 | 31 | 35 |
+| `0x21` locked IMU capture | device to host | legacy IMU body, sensor counter u32 (24 bits), ready lower u64, ready upper u64, read completed u64 (ESP microseconds) | 59 | 63 |
 | `0x30` GNSS NAVX query | host to device | empty | 0 | 4 |
 | `0x31` GNSS NAVX state | device to host | status u8, followed by the raw 44-byte little-endian CASIC CFG-NAVX payload on success | 1 or 45 | 5 or 49 |
 | `0x32` GNSS dynamic-model set | host to device | documented CFG-NAVX dynamic-model value u8 (0 through 7) | 1 | 5 |
@@ -183,7 +184,10 @@ and escape bytes are not part of the CRC.
 | `0x7f` error | device to host | error code | 1 | 5 |
 
 Enable flag bit 0 is GPS and bit 1 is IMU. Supported IMU rates are 10, 25,
-50, and 100 Hz. Axis values use the QMI8658's native board orientation; frame
+50, and 100 Hz targets. In new firmware, 100 requests every native sample
+(about 112 Hz with the pinned recipe); 10/25/50 are decimated diagnostics.
+The configuration response reports the requested target, not a measured ODR.
+See [acquisition, fault bits and calibration limits](SENSORS.md). Axis values use the QMI8658's native board orientation; frame
 conversion and sensor fusion belong on the host.
 
 The capabilities rate mask uses bits 0 through 3 for 10, 25, 50, and 100 Hz.
@@ -224,18 +228,20 @@ Malformed or corrupt telemetry frames are discarded. Radio frames before,
 during, and after renegotiation continue through the broker.
 
 GPS and IMU sequences start at zero, increment for every attempted emission,
-and wrap from `65535` to zero. Thus a modulo-65536 gap exposes device-side
+and wrap from `65535` to zero. Native IMU sensor-counter gaps also advance
+the wire sequence and set a loss flag on the next delivered sample. Thus a modulo-65536 gap exposes device-side
 backpressure drops as well as link loss. The five statistics values are
 snapshots; 32-bit counters also wrap modulo their field width. Sequence
 rollover is not a reset. Only a reset indication or a backwards device clock
 that cannot belong to the current epoch starts a new session.
 
-`device_time_us` is the ESP32 monotonic microsecond clock sampled when a valid
-NMEA sentence is emitted or immediately before an IMU read. It is not GNSS
-UTC, PPS-disciplined time, or the exact sensor conversion instant. GNSS UTC
-remains inside applicable NMEA sentences. Host records may add receive wall
-time, but consumers must retain the device timestamp and session boundary
-rather than treating host arrival time as sensor time.
+For GNSS, `device_time_us` is the ESP NMEA emission time, not the receiver's
+measurement epoch. Preserve the original NMEA UTC/date. Legacy `0x20` IMU
+frames use a read-start timestamp. New `0x21` frames use the midpoint of a
+data-ready observation interval, and retain both bounds and read completion.
+An absent bound is explicitly invalid. None of these values establishes a
+Pi clock mapping or calibrates sensor filter delay. Host wall/monotonic receipt
+times stay separate. See [SENSORS.md](SENSORS.md) before using data for fusion.
 
 Telemetry is best-effort and cannot reserve space needed by radio output. The
 firmware emits a telemetry frame only when the complete worst-case escaped

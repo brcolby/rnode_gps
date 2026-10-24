@@ -49,7 +49,9 @@ and socket. Stop it with Ctrl-C before flashing, running `rnodeconf`, or using
 a direct serial smoke test. A broker-mode smoke test validates endpoints from
 this process; it does not launch the broker itself.
 
-The broker requests GPS plus 100 Hz IMU by default. Use `--no-gps`, `--no-imu`,
+The broker requests GPS plus the 100 Hz IMU target by default. New firmware
+preserves every native sample (nominally about 112 Hz) for this target; measure
+the actual rate. Update this broker with the firmware to decode `0x21`. Use `--no-gps`, `--no-imu`,
 or `--imu-rate {10,25,50,100}` to change that. It polls firmware drop
 statistics every 30 seconds; `--stats-interval` changes that interval and
 `--negotiation-warn` changes the default 10-second warning threshold.
@@ -163,3 +165,12 @@ KISS-escape faults; reset recovery latency; observed queue bounds; and broker
 thread/endpoint cleanup. The runner fragments every input with a fixed seed,
 delays both sensor consumers in bounded bursts, and fails if any ordinary RNode
 frame is rewritten or lost.
+
+## Acquisition evidence for fusion
+
+[Sensor acquisition](../SENSORS.md) defines the locked IMU metadata and status
+bits. Legacy frames remain decodable but have no claimed acquisition bound.
+`host_time_monotonic_ns` is host receipt, separate from device acquisition.
+New JSON rows include `acquisition`, `sensor_counter`, `ready_lower_us`,
+`ready_upper_us`, and `read_completed_us`. Keep these fields in recordings.
+Unknown filter delay, clock error or GNSS accuracy must not become zero.
