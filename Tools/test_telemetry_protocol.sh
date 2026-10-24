@@ -6,9 +6,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 protocol_binary=$(mktemp "${TMPDIR:-/tmp}/rnode-gps-protocol.XXXXXX")
 state_binary=$(mktemp "${TMPDIR:-/tmp}/rnode-gps-state.XXXXXX")
 l76k_binary=$(mktemp "${TMPDIR:-/tmp}/rnode-gps-l76k.XXXXXX")
+imu_binary=$(mktemp "${TMPDIR:-/tmp}/rnode-gps-imu.XXXXXX")
 
 cleanup() {
-  rm -f -- "$protocol_binary" "$state_binary" "$l76k_binary"
+  rm -f -- "$protocol_binary" "$state_binary" "$l76k_binary" "$imu_binary"
 }
 trap cleanup EXIT
 
@@ -21,3 +22,7 @@ trap cleanup EXIT
 "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
   "$repo_root/Tests/l76k_protocol_test.cpp" -o "$l76k_binary"
 "$l76k_binary"
+
+"${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+  "$repo_root/Tests/telemetry_imu_test.cpp" -o "$imu_binary"
+"$imu_binary"

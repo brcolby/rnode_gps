@@ -18,6 +18,7 @@
 #include "L76KProtocol.h"
 #include "TelemetryFrameParser.h"
 #include "TelemetryState.h"
+#include "TelemetryImu.h"
 
 HardwareSerial telemetry_gps_serial(1);
 SPIClass telemetry_imu_spi(HSPI);
@@ -25,8 +26,7 @@ SensorQMI8658 telemetry_imu;
 
 TelemetryState telemetry_state = telemetry_initial_state();
 TelemetryFrameBuffer<CMD_L> telemetry_frame;
-uint64_t telemetry_last_imu_us = 0;
-struct TelemetryImuSample { uint8_t payload[33]; };
+struct TelemetryImuSample { uint8_t payload[TELEMETRY_IMU_CAPTURE_BYTES]; };
 QueueHandle_t telemetry_imu_queue = NULL;
 std::atomic<uint8_t> telemetry_imu_task_rate(0);
 std::atomic<uint16_t> telemetry_imu_task_sequence(0);
@@ -246,68 +246,106 @@ void telemetry_drain_gps() {
   }
 }
 
-bool telemetry_capture_imu(uint64_t timestamp_us, uint16_t sequence, TelemetryImuSample &sample) {
-  float ax, ay, az, gx, gy, gz;
-  if (!telemetry_imu.getAccelerometer(ax, ay, az) ||
-      !telemetry_imu.getGyroscope(gx, gy, gz)) {
-    return false;
+// Read the entire locked TIMESTAMP..GZ_H register block in one transaction.
+// GZ_H releases the lock. SensorLib 0.3.3's getTimestamp() has incorrect repeat/
+// wrap arithmetic, so retain the hardware's raw 24-bit count instead.
+void telemetry_read_imu_registers(uint8_t address, uint8_t *data, size_t length) {
+  telemetry_imu_spi.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(IMU_CS, LOW);
+  telemetry_imu_spi.transfer(address | 0x80);
+  for (size_t i = 0; i < length; ++i) data[i] = telemetry_imu_spi.transfer(0);
+  digitalWrite(IMU_CS, HIGH);
+  telemetry_imu_spi.endTransaction();
+}
+
+void telemetry_capture_imu(const uint8_t *raw, uint16_t sequence, uint8_t status,
+    uint64_t lower_us, uint64_t upper_us, uint64_t read_end_us, TelemetryImuSample &sample) {
+  uint32_t counter = raw[0] | (uint32_t)raw[1] << 8 | (uint32_t)raw[2] << 16;
+  bool bracketed = telemetry_imu_bracket_valid(lower_us, upper_us, read_end_us);
+  // Midpoint of observed data-ready bounds, not UART/host receipt time. The
+  // sensor's filter/group delay is separate and must be calibrated on the host.
+  uint64_t capture_us = bracketed ? lower_us + (upper_us - lower_us) / 2 : upper_us;
+  if (!bracketed) status |= TELEMETRY_IMU_TIMING_FAULT;
+  for (int i = 5; i < 17; i += 2) {
+    if (telemetry_imu_saturated(telemetry_imu_i16(raw + i))) status |= TELEMETRY_IMU_SATURATED;
   }
-
-  float temperature = telemetry_imu.getTemperature_C();
-  uint8_t status = 0x03;
-  if (isfinite(temperature)) status |= 0x04;
-  else temperature = 0.0f;
-
   uint8_t *payload = sample.payload;
   size_t offset = 0;
   payload[offset++] = TELEMETRY_PROTOCOL_VERSION;
-  payload[offset++] = TELEMETRY_IMU_SAMPLE;
+  payload[offset++] = TELEMETRY_IMU_CAPTURE;
   telemetry_put_u16(payload, offset, sequence);
-  telemetry_put_u64(payload, offset, timestamp_us);
-  telemetry_put_i16(payload, offset, (int16_t)lroundf(ax * 1000.0f));
-  telemetry_put_i16(payload, offset, (int16_t)lroundf(ay * 1000.0f));
-  telemetry_put_i16(payload, offset, (int16_t)lroundf(az * 1000.0f));
-  telemetry_put_i32(payload, offset, (int32_t)lroundf(gx * 1000.0f));
-  telemetry_put_i32(payload, offset, (int32_t)lroundf(gy * 1000.0f));
-  telemetry_put_i32(payload, offset, (int32_t)lroundf(gz * 1000.0f));
-  telemetry_put_i16(payload, offset, (int16_t)lroundf(temperature * 100.0f));
+  telemetry_put_u64(payload, offset, capture_us);
+  for (int i = 5; i < 11; i += 2)
+    telemetry_put_i16(payload, offset, telemetry_imu_scaled(telemetry_imu_i16(raw + i), 4000));
+  for (int i = 11; i < 17; i += 2)
+    telemetry_put_i32(payload, offset, telemetry_imu_scaled(telemetry_imu_i16(raw + i), 512000));
+  telemetry_put_i16(payload, offset, telemetry_imu_scaled(telemetry_imu_i16(raw + 3), 12800));
   payload[offset++] = status;
-
-  return true;
+  telemetry_put_u32(payload, offset, counter);
+  telemetry_put_u64(payload, offset, lower_us);
+  telemetry_put_u64(payload, offset, upper_us);
+  telemetry_put_u64(payload, offset, read_end_us);
 }
 
 void telemetry_imu_worker(void *) {
-  TickType_t last_wake = xTaskGetTickCount();
   uint8_t last_rate = 0;
   uint16_t sequence = 0;
+  uint64_t last_empty_us = 0, last_output_us = 0;
+  TelemetryImuContinuity continuity;
   for (;;) {
+    // Poll at one RTOS tick, not at the requested publication frequency. The
+    // 100-Hz target means every native sample (nominal ~112 Hz on this recipe).
+    // 10/25/50 are explicitly decimated diagnostics, not lossless VIO inputs.
+    vTaskDelay(1);
     uint8_t rate = telemetry_imu_task_rate.load();
-    if (!rate) {
-      last_rate = 0;
-      vTaskDelay(pdMS_TO_TICKS(1));
-      last_wake = xTaskGetTickCount();
+    if (!rate) { last_rate = 0; last_empty_us = 0; continue; }
+    if (rate != last_rate) {
+      continuity = TelemetryImuContinuity();
+      continuity.pending_faults = TELEMETRY_IMU_TIMING_FAULT;
+      last_empty_us = last_output_us = 0;
+      last_rate = rate;
+    }
+    uint64_t poll_start = (uint64_t)esp_timer_get_time();
+    uint8_t status = telemetry_imu.getIrqStatus();
+    uint64_t ready_observed = (uint64_t)esp_timer_get_time();
+    if (!(status & 0x01)) {
+      // Use the start of the SPI read as a conservative lower bound.
+      last_empty_us = poll_start;
       continue;
     }
-    const TickType_t period = pdMS_TO_TICKS(1000 / rate);
-    if (rate != last_rate) { last_wake = xTaskGetTickCount(); last_rate = rate; }
-    // Do not invent rapid catch-up samples after an actual scheduling overrun.
-    const TickType_t late = xTaskGetTickCount() - last_wake;
-    if (late >= period) {
-      const uint32_t skipped = late / period;
-      sequence += skipped;
-      telemetry_imu_task_drops.fetch_add(skipped);
-      last_wake += skipped * period;
-    }
-    vTaskDelayUntil(&last_wake, period);
-    if (telemetry_imu_task_rate.load() != rate) continue;
-    TelemetryImuSample sample;
-    const uint64_t timestamp = (uint64_t)esp_timer_get_time();
-    bool captured = telemetry_imu.getDataReady() && telemetry_capture_imu(timestamp, sequence, sample);
-    sequence++;
-    telemetry_imu_task_sequence.store(sequence);
-    if (!captured || xQueueSend(telemetry_imu_queue, &sample, 0) != pdTRUE) {
+    // QMI locking protocol requires >=12 us at this gyro ODR. Verify Locked
+    // rather than assuming a delayed read or failed SPI transaction succeeded.
+    delayMicroseconds(20);
+    if (!(telemetry_imu.getIrqStatus() & 0x02)) {
+      uint8_t ignored;
+      telemetry_read_imu_registers(0x40, &ignored, 1); // release any partial lock
+      continuity.pending_faults |= TELEMETRY_IMU_TIMING_FAULT | TELEMETRY_IMU_SAMPLE_LOSS;
       telemetry_imu_task_drops.fetch_add(1);
+      telemetry_imu_task_sequence.store(++sequence);
+      last_empty_us = 0;
+      continue;
     }
+    uint8_t raw[17];
+    telemetry_read_imu_registers(0x30, raw, sizeof(raw));
+    uint64_t read_end = (uint64_t)esp_timer_get_time();
+    uint32_t counter = raw[0] | (uint32_t)raw[1] << 8 | (uint32_t)raw[2] << 16;
+    uint32_t missed = continuity.observe(counter);
+    telemetry_imu_task_drops.fetch_add(missed);
+    if (rate == 100) sequence += missed;
+    if (rate == 100 || read_end - last_output_us >= 1000000ULL / rate) {
+      TelemetryImuSample sample;
+      uint8_t flags = 0x07 | continuity.pending_faults;
+      if (rate != 100) flags |= TELEMETRY_IMU_DECIMATED;
+      telemetry_capture_imu(raw, sequence++, flags, last_empty_us, ready_observed, read_end, sample);
+      bool sent = xQueueSend(telemetry_imu_queue, &sample, 0) == pdTRUE;
+      continuity.delivery(sent);
+      if (!sent) telemetry_imu_task_drops.fetch_add(1);
+      telemetry_imu_task_sequence.store(sequence);
+      last_output_us = read_end;
+    }
+    // A completed read releases the lock, but does not prove no new sample is
+    // ready. Require an actual empty poll before claiming a bounded next epoch.
+    last_empty_us = 0;
   }
 }
 
@@ -331,22 +369,23 @@ void telemetry_init() {
     telemetry_imu_spi, IMU_CS, SD_MOSI, SD_MISO, SD_CLK
   );
   if (imu_ready) {
-    telemetry_state.ready |= TELEMETRY_IMU_READY;
-    telemetry_imu.configAccelerometer(
+    bool configured = telemetry_imu.configAccelerometer(
       SensorQMI8658::ACC_RANGE_4G,
       SensorQMI8658::ACC_ODR_125Hz,
       SensorQMI8658::LPF_MODE_0
-    );
-    telemetry_imu.configGyroscope(
+    ) == 0;
+    configured &= telemetry_imu.configGyroscope(
       SensorQMI8658::GYR_RANGE_512DPS,
       SensorQMI8658::GYR_ODR_112_1Hz,
       SensorQMI8658::LPF_MODE_3
-    );
-    telemetry_imu.enableGyroscope();
-    telemetry_imu.enableAccelerometer();
+    ) == 0;
+    configured &= telemetry_imu.enableGyroscope();
+    configured &= telemetry_imu.enableAccelerometer();
+    configured &= telemetry_imu.enableLockingMechanism() == 0;
+    if (!configured) return;
     telemetry_imu_queue = xQueueCreate(64, sizeof(TelemetryImuSample));
-    if (!telemetry_imu_queue || xTaskCreate(telemetry_imu_worker, "rnode-imu", 4096, NULL, 2, NULL) != pdPASS) {
-      telemetry_state.ready &= ~TELEMETRY_IMU_READY;
+    if (telemetry_imu_queue && xTaskCreate(telemetry_imu_worker, "rnode-imu", 4096, NULL, 2, NULL) == pdPASS) {
+      telemetry_state.ready |= TELEMETRY_IMU_READY;
     }
   }
 }

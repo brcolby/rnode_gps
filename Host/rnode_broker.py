@@ -39,6 +39,7 @@ STATS_QUERY = 0x04
 STATS_RESPONSE = 0x05
 GPS_NMEA = 0x10
 IMU_SAMPLE = 0x20
+IMU_CAPTURE = 0x21
 GNSS_NAVX_QUERY = 0x30
 GNSS_NAVX_STATE = 0x31
 GNSS_DYN_MODEL_SET = 0x32
@@ -242,6 +243,10 @@ class IMUMessage:
     gyro_mdps: tuple[int, int, int]
     temperature_centi_c: int
     status: int
+    sensor_counter: int | None = None
+    ready_lower_us: int | None = None
+    ready_upper_us: int | None = None
+    read_completed_us: int | None = None
 
     def as_json(self) -> bytes:
         gravity = 9.80665 / 1000.0
@@ -250,6 +255,7 @@ class IMUMessage:
             "sequence": self.sequence,
             "device_time_us": self.device_time_us,
             "host_time_ns": time.time_ns(),
+            "host_time_monotonic_ns": time.monotonic_ns(),
             "accel_mg": dict(zip(("x", "y", "z"), self.accel_mg)),
             "accel_m_s2": dict(
                 zip(("x", "y", "z"), (value * gravity for value in self.accel_mg))
@@ -261,6 +267,14 @@ class IMUMessage:
             "temperature_c": self.temperature_centi_c / 100.0,
             "status": self.status,
         }
+        if self.sensor_counter is not None:
+            payload.update(
+                acquisition="qmi8658-locked-ready-bracket/v1",
+                sensor_counter=self.sensor_counter,
+                ready_lower_us=self.ready_lower_us,
+                ready_upper_us=self.ready_upper_us,
+                read_completed_us=self.read_completed_us,
+            )
         return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
@@ -345,8 +359,17 @@ def decode_telemetry(payload: bytes) -> TelemetryMessage:
         if not valid_nmea(sentence):
             raise ValueError("invalid NMEA sentence in telemetry frame")
         return GPSMessage(sequence, device_time_us, sentence)
-    if subtype == IMU_SAMPLE and len(body) == 31:
-        values = struct.unpack(">HQhhhiiihB", body)
+    if (subtype == IMU_SAMPLE and len(body) == 31) or (subtype == IMU_CAPTURE and len(body) == 59):
+        values = struct.unpack(">HQhhhiiihB", body[:31])
+        acquisition = {}
+        if subtype == IMU_CAPTURE:
+            counter, lower, upper, completed = struct.unpack(">IQQQ", body[31:])
+            if counter > 0xffffff or upper > completed:
+                raise ValueError("invalid IMU acquisition counter/times")
+            if not (values[9] & 0x40) and not (0 < lower < upper and values[1] == lower + (upper - lower) // 2):
+                raise ValueError("invalid IMU data-ready bracket")
+            acquisition = dict(sensor_counter=counter, ready_lower_us=lower,
+                               ready_upper_us=upper, read_completed_us=completed)
         return IMUMessage(
             sequence=values[0],
             device_time_us=values[1],
@@ -354,6 +377,7 @@ def decode_telemetry(payload: bytes) -> TelemetryMessage:
             gyro_mdps=(values[5], values[6], values[7]),
             temperature_centi_c=values[8],
             status=values[9],
+            **acquisition,
         )
     if subtype == STATS_RESPONSE and len(body) == 16:
         return Statistics(*struct.unpack(">HHIII", body))

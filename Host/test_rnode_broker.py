@@ -22,6 +22,7 @@ from Host.rnode_broker import (
     GPS_NMEA,
     GPS_ENABLED,
     IMU_SAMPLE,
+    IMU_CAPTURE,
     PROTOCOL_VERSION,
     STATS_RESPONSE,
     TFEND,
@@ -93,6 +94,27 @@ class KissCodecTest(unittest.TestCase):
 
 
 class TelemetryCodecTest(unittest.TestCase):
+    def test_locked_acquisition_metadata_and_faults_survive_wire(self):
+        for fault in (0, 8, 16, 32, 64, 128):
+            base = struct.pack(">HQhhhiiihB", 12, 1050, 0, 0, 1000, -5000, 10, 0, 2500, 7 | fault)
+            body = base + struct.pack(">IQQQ", 0xffffff, 1000, 1100, 1150)
+            sample = decode_telemetry(encode_telemetry(IMU_CAPTURE, body))
+            self.assertEqual(sample.sensor_counter, 0xffffff)
+            self.assertEqual(sample.status, 7 | fault)
+            row = json.loads(sample.as_json())
+            self.assertEqual(row["device_time_us"], 1050)
+            self.assertEqual(row["ready_lower_us"], 1000)
+            self.assertEqual(row["read_completed_us"], 1150)
+            self.assertGreater(row["host_time_monotonic_ns"], 0)
+            self.assertEqual(row["acquisition"], "qmi8658-locked-ready-bracket/v1")
+
+    def test_rejects_impossible_acquisition_metadata(self):
+        base = struct.pack(">HQhhhiiihB", 12, 1050, 0, 0, 1000, 0, 0, 0, 2500, 7)
+        for metadata in ((0x1000000, 1000, 1100, 1150), (1, 1100, 1000, 1150),
+                         (1, 1000, 1100, 1090), (1, 900, 1100, 1150)):
+            with self.assertRaises(ValueError):
+                decode_telemetry(encode_telemetry(IMU_CAPTURE, base + struct.pack(">IQQQ", *metadata)))
+
     def test_crc_matches_ccitt_false_check_value(self) -> None:
         self.assertEqual(crc16_ccitt(b"123456789"), 0x29B1)
 
