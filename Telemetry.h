@@ -379,14 +379,27 @@ void telemetry_init() {
       SensorQMI8658::GYR_ODR_112_1Hz,
       SensorQMI8658::LPF_MODE_3
     ) == 0;
-    configured &= telemetry_imu.enableGyroscope();
-    configured &= telemetry_imu.enableAccelerometer();
-    configured &= telemetry_imu.enableLockingMechanism() == 0;
-    if (!configured) return;
+    if (!configured) {
+      Serial.println("IMU init failed: accelerometer/gyro configuration");
+      return;
+    }
+    uint8_t control7 = 0;
+    configured = telemetry_enable_spi_sync(telemetry_imu, [&]() {
+      telemetry_read_imu_registers(0x08, &control7, 1);
+      return control7;
+    });
+    if (!configured) {
+      Serial.printf("IMU init failed: SPI sync enable/readback CTRL7=0x%02x\r\n", control7);
+      return;
+    }
     telemetry_imu_queue = xQueueCreate(64, sizeof(TelemetryImuSample));
     if (telemetry_imu_queue && xTaskCreate(telemetry_imu_worker, "rnode-imu", 4096, NULL, 2, NULL) == pdPASS) {
       telemetry_state.ready |= TELEMETRY_IMU_READY;
+    } else {
+      Serial.println("IMU init failed: acquisition task allocation");
     }
+  } else {
+    Serial.println("IMU init failed: QMI8658 probe/reset");
   }
 }
 
