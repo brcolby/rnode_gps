@@ -60,4 +60,14 @@ inline bool telemetry_imu_bracket_valid(uint64_t lower, uint64_t upper, uint64_t
   return lower && lower < upper && upper <= read_end;
 }
 
+// QMI8658A Rev A, section 13.2: SPI with an enabled gyro needs CTRL7.syncSmpl,
+// not the AHB clock-gating command required for accel-only low-rate SPI/I2C.
+// SensorLib 0.3.3 enableSyncSampleMode returns bool-as-int (1 means success).
+template <typename Sensor, typename ReadControl>
+bool telemetry_enable_spi_sync(Sensor &sensor, ReadControl read_control) {
+  if (!sensor.enableGyroscope() || !sensor.enableAccelerometer() ||
+      !sensor.enableSyncSampleMode()) return false;
+  return (read_control() & 0x83) == 0x83;
+}
+
 #endif

@@ -1,8 +1,30 @@
+#include <initializer_list>
 #include "../TelemetryImu.h"
 #include <assert.h>
 #include <limits.h>
 
+struct FakeSpiImu {
+  int calls = 0;
+  int fail_at = 0;
+  bool enableGyroscope() { return ++calls != fail_at; }
+  bool enableAccelerometer() { return ++calls != fail_at; }
+  int enableSyncSampleMode() { return ++calls != fail_at; }
+};
+
 int main() {
+  for (int fail = 0; fail <= 3; ++fail) {
+    FakeSpiImu sensor;
+    sensor.fail_at = fail;
+    int reads = 0;
+    bool ok = telemetry_enable_spi_sync(sensor, [&]() { ++reads; return 0x83; });
+    assert(ok == (fail == 0));
+    assert(reads == (fail == 0 ? 1 : 0));
+  }
+  for (int control : {0x00, 0x03, 0x80, 0x81, 0x82}) {
+    FakeSpiImu sensor;
+    assert(!telemetry_enable_spi_sync(sensor, [&]() { return control; }));
+  }
+
   TelemetryImuContinuity state;
   assert(state.observe(0xfffffe) == 0);
   assert(state.observe(0xffffff) == 0);

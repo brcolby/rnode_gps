@@ -14,6 +14,14 @@ now sends every native locked sample, nominally about 112 Hz. Lower requested
 rates are deliberate decimation for diagnostics and are marked unsuitable for
 lossless fusion. Verify actual cadence and configure the consumer accordingly.
 
+Initialization enables both sensors and `CTRL7.syncSmpl`, then verifies all
+three enable bits by SPI readback. It does not issue the AHB clock-gating
+command: [QMI8658A Rev A, section 13.2](https://files.waveshare.com/upload/5/5f/QMI8658A_Datasheet_Rev_A.pdf)
+requires that command for low-rate accelerometer-only SPI or I2C/I3C, not
+this SPI + gyro configuration. SensorLib 0.3.3 returns **1** on success
+from `enableSyncSampleMode()`. Initialization failures print their stage
+on the runtime serial port before telemetry negotiation.
+
 The worker polls readiness at one FreeRTOS tick, uses the QMI locking protocol,
 waits at least 12 µs, checks Locked, then reads the complete counter, temperature,
 accelerometer and gyro register block. Reading GZ_H releases the lock. This
