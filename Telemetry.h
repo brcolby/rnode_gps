@@ -372,7 +372,7 @@ void telemetry_init() {
     bool configured = telemetry_imu.configAccelerometer(
       SensorQMI8658::ACC_RANGE_4G,
       SensorQMI8658::ACC_ODR_125Hz,
-      SensorQMI8658::LPF_MODE_0
+      SensorQMI8658::LPF_MODE_3
     ) == 0;
     configured &= telemetry_imu.configGyroscope(
       SensorQMI8658::GYR_RANGE_512DPS,
@@ -390,6 +390,26 @@ void telemetry_init() {
     });
     if (!configured) {
       Serial.printf("IMU init failed: SPI sync enable/readback CTRL7=0x%02x\r\n", control7);
+      return;
+    }
+    // Read actual settings before the worker owns SPI. Retain this boot line
+    // beside captures: the unchanged timestamp-method label is not a filter ID.
+    uint8_t control2 = 0, control3 = 0, control5 = 0;
+    telemetry_read_imu_registers(0x03, &control2, 1);
+    telemetry_read_imu_registers(0x04, &control3, 1);
+    telemetry_read_imu_registers(0x06, &control5, 1);
+    uint8_t application_hash[32];
+    const esp_partition_t *application = esp_ota_get_running_partition();
+    if (!application || esp_partition_get_sha256(application, application_hash) != ESP_OK) {
+      Serial.println("IMU init failed: application identity");
+      return;
+    }
+    Serial.printf("IMU config=qmi8658-4g-512dps-odr6-lpf3-3/v1 CTRL2=0x%02x CTRL3=0x%02x CTRL5=0x%02x CTRL7=0x%02x app_sha256=",
+      control2, control3, control5, control7);
+    for (size_t i = 0; i < sizeof(application_hash); ++i) Serial.printf("%02x", application_hash[i]);
+    Serial.println();
+    if (!telemetry_imu_configuration_valid(control2, control3, control5, control7)) {
+      Serial.println("IMU init failed: configuration readback mismatch");
       return;
     }
     telemetry_imu_queue = xQueueCreate(64, sizeof(TelemetryImuSample));
