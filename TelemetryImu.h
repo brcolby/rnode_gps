@@ -12,6 +12,14 @@
 #define TELEMETRY_IMU_DECIMATED 0x80
 #define TELEMETRY_IMU_CAPTURE_BYTES 61
 
+// CTRL2/3 retain range and ODR; CTRL5 enables mode 3 on both sensors.
+// Reject wrong settings (including failed SPI reads) before starting acquisition.
+inline bool telemetry_imu_configuration_valid(uint8_t control2, uint8_t control3,
+    uint8_t control5, uint8_t control7) {
+  return control2 == 0x16 && control3 == 0x56 && control5 == 0x77 &&
+         (control7 & 0x83) == 0x83;
+}
+
 struct TelemetryImuContinuity {
   bool initialized;
   uint32_t previous;

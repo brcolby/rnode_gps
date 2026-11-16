@@ -22,6 +22,10 @@ Update the host broker together with the firmware; see [sensor acquisition](SENS
 a guarantee of loss-free operation. Earlier UART images used 460800, so match
 the baud to the flashed image. Do not enable a serial console on the Pi UART.
 
+The current recipe uses LPF mode 3 for both accelerometer and gyro. Preserve the
+[boot register/hash diagnostic](SENSORS.md#imu) and recheck noise and timing before
+using a calibration fitted with the previous accelerometer LPF mode 0.
+
 Attach both boards' correct LoRa antennas before radio operation. Stop all
 serial consumers before flashing. Back up EEPROM with `rnodeconf --eeprom-backup`
 using the currently installed image's runtime port and baud. Do not erase all

@@ -12,6 +12,13 @@ struct FakeSpiImu {
 };
 
 int main() {
+  assert(telemetry_imu_configuration_valid(0x16, 0x56, 0x77, 0x83));
+  assert(!telemetry_imu_configuration_valid(0x16, 0x56, 0x71, 0x83)); // old accel LPF
+  assert(!telemetry_imu_configuration_valid(0x26, 0x56, 0x77, 0x83)); // wrong range
+  assert(!telemetry_imu_configuration_valid(0x16, 0x55, 0x77, 0x83)); // wrong ODR
+  assert(!telemetry_imu_configuration_valid(0x16, 0x56, 0x77, 0x03)); // no sync
+  assert(!telemetry_imu_configuration_valid(0xff, 0xff, 0xff, 0xff));
+  assert(!telemetry_imu_configuration_valid(0, 0, 0, 0));
   for (int fail = 0; fail <= 3; ++fail) {
     FakeSpiImu sensor;
     sensor.fail_at = fail;

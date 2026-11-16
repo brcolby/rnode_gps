@@ -8,7 +8,7 @@ broker subtracts gyro bias or gravity. The display is optional in this build.
 ## IMU
 
 The QMI8658 recipe retains ±4 g acceleration, ±512 deg/s angular rate,
-`ACC_ODR_125Hz` / `GYR_ODR_112_1Hz`, and LPF modes 0 / 3. These enum names are
+`ACC_ODR_125Hz` / `GYR_ODR_112_1Hz`, and LPF modes 3 / 3. These enum names are
 nominal settings, not measured rates or delays. The 100 Hz publication target
 now sends every native locked sample, nominally about 112 Hz. Lower requested
 rates are deliberate decimation for diagnostics and are marked unsuitable for
@@ -21,6 +21,21 @@ requires that command for low-rate accelerometer-only SPI or I2C/I3C, not
 this SPI + gyro configuration. SensorLib 0.3.3 returns **1** on success
 from `enableSyncSampleMode()`. Initialization failures print their stage
 on the runtime serial port before telemetry negotiation.
+
+Before starting the worker, initialization also reads CTRL2/3/5 and refuses
+acquisition unless they are `0x16`, `0x56`, `0x77`, respectively. A boot diagnostic
+prints these actual values, CTRL7, configuration tag
+`qmi8658-4g-512dps-odr6-lpf3-3/v1`, and the running application's validation
+SHA-256 (the same identity used by `rnodeconf -L`, not the whole-file hash).
+Capture this line at 230400 baud before pressing RESET, with the broker stopped,
+and retain it with the image manifest and raw capture. This is boot-time evidence,
+not continuous register monitoring; subtype `0x21` is unchanged.
+
+The accelerometer previously used LPF mode 0 (`CTRL5=0x71`). No software filter
+is added. Reassess noise and relative accelerometer/gyro delay after this change;
+then refit camera/IMU timing and check extrinsics before selecting calibration.
+Neither an old 130 ms alignment buffer nor a camera time offset is automatically
+valid for this filter configuration. Retain prior calibration for rollback.
 
 The worker polls readiness at one FreeRTOS tick, uses the QMI locking protocol,
 waits at least 12 µs, checks Locked, then reads the complete counter, temperature,
